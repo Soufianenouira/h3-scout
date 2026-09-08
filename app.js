@@ -30,18 +30,23 @@ const POSITIONS = [1,2,3,4,5,6]; // FIVB-Rotationspositionen
  
 // Richtungserfassung (wer schlägt wohin) — nur für Aufschlag und Angriff
 const ZONE_SKILLS = ['S','A'];
-// Ziel-Zonen im gegnerischen Feld, 3x3-Raster (tief→netznah), in einem 0-100(x) / 0-65(y) Koordinatensystem
-const TARGET_ZONES = [
-  {id:1,x:17,y:12},{id:2,x:50,y:12},{id:3,x:83,y:12},
-  {id:4,x:17,y:32},{id:5,x:50,y:32},{id:6,x:83,y:32},
-  {id:7,x:17,y:52},{id:8,x:50,y:52},{id:9,x:83,y:52},
-];
-// Ausgangspunkt eines Angriffs, abhängig von der Rotationsposition der angreifenden Person
+// Court-Koordinatensystem: 0–100 (Breite) x 0–130 (Länge), Netz bei y=65.
+// Position der eigenen Mannschaft (unten, eigene Grundlinie bei y=130).
 const ORIGIN_BY_POSITION = {
   1:{x:83,y:125}, 2:{x:83,y:80}, 3:{x:50,y:78}, 4:{x:17,y:80}, 5:{x:17,y:105}, 6:{x:50,y:108}
 };
-// Aufschlag kommt immer von der Grundlinie hinter Position 1
-const SERVE_ORIGIN = {x:83,y:128};
+// Position im Court-Koordinatensystem für ein Team (Gegner wird an der Netzlinie gespiegelt, damit
+// beide Mannschaften im selben Feld realistisch stehen).
+function positionCoord(team, position){
+  const p = ORIGIN_BY_POSITION[position] || ORIGIN_BY_POSITION[3];
+  return team==='home' ? p : {x:p.x, y:130-p.y};
+}
+// Ausgangspunkt einer Aktion: Aufschlag immer von Position 1, sonst die aktuelle Rotationsposition.
+function originFor(team, playerId, skillCode, set){
+  if(skillCode==='S') return positionCoord(team,1);
+  const pos = playerPosition(team, playerId, set) || 3;
+  return positionCoord(team, pos);
+}
  
 let state = loadState();
 let route = {name:'home'};
@@ -118,6 +123,71 @@ function el(tag, attrs={}, children=[]){
     e.appendChild(c instanceof Node ? c : document.createTextNode(String(c)));
   });
   return e;
+}
+ 
+function svgEl(tag, attrs={}, children=[]){
+  const e = document.createElementNS('http://www.w3.org/2000/svg', tag);
+  for(const k in attrs){
+    if(k.startsWith('on') && typeof attrs[k]==='function') e.addEventListener(k.slice(2), attrs[k]);
+    else e.setAttribute(k, attrs[k]);
+  }
+  (Array.isArray(children)?children:[children]).forEach(c=>{ if(c!=null) e.appendChild(c); });
+  return e;
+}
+ 
+// Interaktives Spielfeld: zeigt beide Aufstellungen als Kreise auf einem echten Court.
+// opts: selectableTeam ('home'|'away'|'both'|null), onSelectPlayer(team,pid), selectedPlayerId,
+//       onTapTarget(x,y), previewFrom{x,y}, previewTo{x,y}, previewColor
+function buildCourt(set, match, opts={}){
+  const svg = svgEl('svg', {viewBox:'0 0 100 130', style:'width:100%;height:auto;display:block;background:#2b6e3f;border-radius:10px;touch-action:none;'});
+  svg.appendChild(svgEl('rect',{x:2,y:2,width:96,height:126,fill:'#3a8752',stroke:'#e8f5ea','stroke-width':1}));
+  svg.appendChild(svgEl('line',{x1:2,y1:65,x2:98,y2:65,stroke:'#e8f5ea','stroke-width':1.8}));
+  // Grund-Rasterlinien (3 Spalten je Feldhälfte) zur Orientierung
+  [34,66].forEach(x=>{
+    svg.appendChild(svgEl('line',{x1:x,y1:2,x2:x,y2:128,stroke:'#e8f5ea','stroke-width':0.4,'stroke-opacity':0.5}));
+  });
+ 
+  if(opts.onTapTarget){
+    const hit = svgEl('rect',{x:2,y:2,width:96,height:126,fill:'transparent', style:'cursor:crosshair'});
+    hit.addEventListener('click', (ev)=>{
+      const rect = svg.getBoundingClientRect();
+      const x = Math.max(3,Math.min(97, (ev.clientX-rect.left)/rect.width*100));
+      const y = Math.max(3,Math.min(127, (ev.clientY-rect.top)/rect.height*130));
+      opts.onTapTarget(x,y);
+    });
+    svg.appendChild(hit);
+  }
+ 
+  if(opts.previewFrom && opts.previewTo){
+    const c = opts.previewColor||'#facc15';
+    svg.appendChild(svgEl('line',{x1:opts.previewFrom.x,y1:opts.previewFrom.y,x2:opts.previewTo.x,y2:opts.previewTo.y, stroke:c,'stroke-width':1.6,'stroke-dasharray':'3,2'}));
+    svg.appendChild(svgEl('circle',{cx:opts.previewTo.x,cy:opts.previewTo.y,r:2.4,fill:c}));
+  }
+ 
+  ['home','away'].forEach(team=>{
+    const lineup = team==='home' ? set.homeLineup : set.awayLineup;
+    const teamColor = team==='home' ? '#3b82f6' : '#ef4444';
+    lineup.forEach((pid,idx)=>{
+      if(!pid) return;
+      const pos = idx+1;
+      const c = positionCoord(team,pos);
+      const isServer = set.servingTeam===team && pos===1;
+      const selectable = opts.selectableTeam==='both' || opts.selectableTeam===team;
+      const isSelected = pid===opts.selectedPlayerId;
+      const g = svgEl('g', selectable ? {style:'cursor:pointer', onclick:()=>opts.onSelectPlayer(team,pid)} : {});
+      g.appendChild(svgEl('circle',{cx:c.x,cy:c.y,r:8.5, fill:teamColor, stroke: isSelected?'#facc15':'#0f172a', 'stroke-width': isSelected?2.2:1, opacity: selectable?1:0.5}));
+      const text = svgEl('text',{x:c.x,y:c.y+2.8,'text-anchor':'middle','font-size':7,fill:'#fff','font-weight':700});
+      text.textContent = String(playerNumber(team,pid,match));
+      text.setAttribute('style','pointer-events:none');
+      g.appendChild(text);
+      if(isServer){
+        const ball = svgEl('circle',{cx:c.x+8,cy:c.y-8,r:2.2, fill:'#facc15', stroke:'#0f172a','stroke-width':0.5});
+        g.appendChild(ball);
+      }
+      svg.appendChild(g);
+    });
+  });
+  return svg;
 }
  
 function go(r){ route = r; render(); window.scrollTo(0,0); }
@@ -376,9 +446,11 @@ function renderLive(header, main){
   board.appendChild(el('button',{class:'btn ghost block', style:'margin-top:8px', onclick:()=>undoLastAction(match)},'↩ Letzte Aktion rückgängig'));
   main.appendChild(board);
  
-  // Aufstellung (Rotation) beider Teams
-  main.appendChild(lineupView('Deine Aufstellung', set.homeLineup, 'home', match, set));
-  main.appendChild(lineupView('Gegner-Aufstellung', set.awayLineup, 'away', match, set));
+  // Spielfeld mit beiden Aufstellungen
+  const fieldCard = el('div',{class:'card'});
+  fieldCard.appendChild(el('h2',{}, 'Spielfeld  ·  Blau: '+state.teamName+'  ·  Rot: '+match.opponentName));
+  fieldCard.appendChild(buildCourt(set, match, {}));
+  main.appendChild(fieldCard);
  
   // Aktionen dieser Rally
   const rallyCard = el('div',{class:'card'});
@@ -412,83 +484,55 @@ function renderLive(header, main){
   main.appendChild(endCard);
 }
  
-function lineupView(title, lineup, team, match, set){
-  const card = el('div',{class:'card'});
-  card.appendChild(el('h2',{}, title + (set.servingTeam===team? '  ·  Aufschlag':'')));
-  const grid = el('div',{style:'display:grid; grid-template-columns:repeat(3,1fr); gap:8px;'});
-  // Anzeige: vorne (4,3,2) oben, hinten (5,6,1) unten - vereinfachte Visualisierung
-  const order = [3,2,1,4,5,0]; // Index in lineup array (0-basiert Pos1..6) für Positionen 4,3,2,5,6,1
-  const labels = [4,3,2,5,6,1];
-  order.forEach((idx,i)=>{
-    const pid = lineup[idx];
-    const isServer = (labels[i]===1);
-    grid.appendChild(el('div',{style:`background:${isServer?'var(--accent)':'var(--bg2)'};border-radius:10px;padding:10px;text-align:center;`},[
-      el('div',{style:'font-size:10px;color:'+(isServer?'#dbeafe':'var(--muted)')}, 'Pos '+labels[i]),
-      el('div',{style:'font-weight:700'}, pid? playerNumber(team,pid,match) : '–')
-    ]));
-  });
-  card.appendChild(grid);
-  return card;
-}
- 
 function openActionPanel(match, skillCode){
   const set = currentSet(match);
   const skill = SKILL_MAP[skillCode];
   const holder = document.getElementById('actionPanel');
   holder.innerHTML='';
  
-  const state_panel = { team: skillCode==='S' ? set.servingTeam : (skillCode==='R'? (set.servingTeam==='home'?'away':'home') : set.servingTeam), playerId:'', code:'', toZone:null };
+  // Bei Aufschlag/Annahme ist das Team durch die Spielsituation vorgegeben (nur diese Seite antippbar).
+  // Bei den anderen Aktionen kann auf beiden Seiten des Feldes ein Spieler angetippt werden.
+  const fixedTeam = skillCode==='S' ? set.servingTeam : (skillCode==='R' ? (set.servingTeam==='home'?'away':'home') : null);
+  const state_panel = { team:null, playerId:'', toPoint:null };
  
   const card = el('div',{class:'card'});
+  const needsTarget = ZONE_SKILLS.includes(skillCode);
   card.appendChild(el('h2',{}, skill.label+' erfassen'));
+  const hint = el('div',{style:'color:var(--muted);font-size:12px;margin-bottom:8px;'});
+  card.appendChild(hint);
  
-  const teamRow = el('div',{class:'row team-row', style:'margin-bottom:10px;'},[
-    el('button',{class:'btn '+(state_panel.team==='home'?'':'secondary'), style:'flex:1', onclick:()=>{ state_panel.team='home'; renderPlayerButtons(); }}, state.teamName),
-    el('button',{class:'btn '+(state_panel.team==='away'?'':'secondary'), style:'flex:1', onclick:()=>{ state_panel.team='away'; renderPlayerButtons(); }}, match.opponentName),
-  ]);
-  card.appendChild(teamRow);
+  const courtHolder = el('div',{});
+  card.appendChild(courtHolder);
  
-  const playerHolder = el('div',{class:'row player-row', style:'margin-bottom:10px;'});
-  card.appendChild(playerHolder);
- 
-  function renderPlayerButtons(){
-    // Team-Umschalter aktualisieren
-    teamRow.children[0].className = 'btn '+(state_panel.team==='home'?'':'secondary');
-    teamRow.children[1].className = 'btn '+(state_panel.team==='away'?'':'secondary');
-    playerHolder.innerHTML='';
-    const lineup = state_panel.team==='home' ? set.homeLineup : set.awayLineup;
-    lineup.forEach((pid)=>{
-      if(!pid) return;
-      const label = playerNumber(state_panel.team,pid,match);
-      const btn = el('button',{class:'btn '+(state_panel.playerId===pid?'':'secondary'), style:'flex:1 1 14%;', onclick:()=>{ state_panel.playerId=pid; renderPlayerButtons(); }}, '#'+label);
-      playerHolder.appendChild(btn);
-    });
-  }
-  renderPlayerButtons();
- 
-  let zoneGrid = null;
-  function renderZoneButtons(){
-    if(!zoneGrid) return;
-    Array.from(zoneGrid.children).forEach((btn,i)=>{
-      const z = TARGET_ZONES[i];
-      btn.className = 'btn '+(state_panel.toZone===z.id?'':'secondary');
-    });
-  }
-  if(ZONE_SKILLS.includes(skillCode)){
-    zoneGrid = el('div',{class:'row zone-row', style:'margin-bottom:10px;'});
-    TARGET_ZONES.forEach(z=>{
-      zoneGrid.appendChild(el('button',{class:'btn secondary', style:'flex:1 1 30%;', onclick:()=>{ state_panel.toZone=z.id; renderZoneButtons(); }}, 'Zone '+z.id));
-    });
-    card.appendChild(el('label',{},'Zielzone im gegnerischen Feld'));
-    card.appendChild(zoneGrid);
+  function currentOrigin(){
+    if(!state_panel.playerId) return null;
+    return originFor(state_panel.team, state_panel.playerId, skillCode, set);
   }
  
-  const evalRow = el('div',{class:'row eval-row'});
+  function renderCourt(){
+    hint.textContent = !state_panel.playerId
+      ? 'Auf den Spieler im Feld tippen, der die Aktion ausgeführt hat.'
+      : (needsTarget && !state_panel.toPoint ? 'Jetzt auf die Stelle im Feld tippen, wohin gespielt wurde.' : 'Bewertung wählen (oder erneut tippen, um Auswahl zu ändern).');
+    courtHolder.innerHTML='';
+    const svg = buildCourt(set, match, {
+      selectableTeam: fixedTeam || 'both',
+      onSelectPlayer: (team,pid)=>{ state_panel.team=team; state_panel.playerId=pid; state_panel.toPoint=null; renderCourt(); },
+      selectedPlayerId: state_panel.playerId,
+      onTapTarget: (needsTarget && state_panel.playerId) ? (x,y)=>{ state_panel.toPoint={x,y}; renderCourt(); } : null,
+      previewFrom: (needsTarget && state_panel.playerId) ? currentOrigin() : null,
+      previewTo: state_panel.toPoint,
+      previewColor: '#facc15'
+    });
+    courtHolder.appendChild(svg);
+  }
+  renderCourt();
+ 
+  const evalRow = el('div',{class:'row eval-row', style:'margin-top:10px;'});
   EVALS.forEach(ev=>{
     evalRow.appendChild(el('button',{class:'btn secondary '+ev.cls, style:'flex:1 1 18%;', onclick:()=>{
-      if(!state_panel.playerId){ alert('Bitte Spieler auswählen.'); return; }
-      if(ZONE_SKILLS.includes(skillCode) && !state_panel.toZone){ alert('Bitte Zielzone auswählen.'); return; }
-      logAction(match, skillCode, state_panel.team, state_panel.playerId, ev.code, state_panel.toZone);
+      if(!state_panel.playerId){ alert('Bitte zuerst im Feld auf einen Spieler tippen.'); return; }
+      if(needsTarget && !state_panel.toPoint){ alert('Bitte Zielort im Feld antippen.'); return; }
+      logAction(match, skillCode, state_panel.team, state_panel.playerId, ev.code, state_panel.toPoint);
       holder.innerHTML='';
     }}, ev.code+' '+ev.label));
   });
@@ -499,13 +543,13 @@ function openActionPanel(match, skillCode){
   holder.appendChild(card);
 }
  
-function logAction(match, skillCode, team, playerId, code, toZone){
+function logAction(match, skillCode, team, playerId, code, toPoint){
   const set = currentSet(match);
   const rally = set.rallies[set.rallies.length-1];
   const action = {skill:skillCode, team, playerId, code, ts:Date.now()};
-  if(ZONE_SKILLS.includes(skillCode) && toZone){
-    action.toZone = toZone;
-    action.fromZone = playerPosition(team, playerId, set);
+  if(ZONE_SKILLS.includes(skillCode) && toPoint){
+    action.toPoint = {x:Math.round(toPoint.x*10)/10, y:Math.round(toPoint.y*10)/10};
+    action.fromPoint = originFor(team, playerId, skillCode, set);
   }
   rally.actions.push(action);
   saveState();
@@ -611,10 +655,10 @@ function computeDirections(match){
   match.sets.forEach(set=>{
     set.rallies.forEach(rally=>{
       rally.actions.forEach(a=>{
-        if(!ZONE_SKILLS.includes(a.skill) || !a.toZone) return;
+        if(!ZONE_SKILLS.includes(a.skill) || !a.toPoint || !a.fromPoint) return;
         const t = dirs[a.team];
         if(!t[a.playerId]) t[a.playerId] = { number: playerNumber(a.team,a.playerId,match), lines:[] };
-        t[a.playerId].lines.push({ skill:a.skill, fromZone:a.fromZone, toZone:a.toZone, code:a.code });
+        t[a.playerId].lines.push({ skill:a.skill, fromPoint:a.fromPoint, toPoint:a.toPoint, code:a.code });
       });
     });
   });
@@ -626,9 +670,7 @@ function directionSVG(playerDirs){
   parts.push('<rect x="2" y="2" width="96" height="126" fill="none" stroke="#3a4a6b" stroke-width="1"/>');
   parts.push('<line x1="2" y1="65" x2="98" y2="65" stroke="#3a4a6b" stroke-width="1.5"/>');
   playerDirs.lines.forEach(l=>{
-    const from = l.skill==='S' ? SERVE_ORIGIN : (ORIGIN_BY_POSITION[l.fromZone] || ORIGIN_BY_POSITION[3]);
-    const to = TARGET_ZONES.find(z=>z.id===l.toZone);
-    if(!to) return;
+    const from = l.fromPoint, to = l.toPoint;
     const color = (l.code==='#'||l.code==='+') ? '#22c55e' : (l.code==='=' ? '#ef4444' : '#94a3b8');
     parts.push(`<line x1="${from.x}" y1="${from.y}" x2="${to.x}" y2="${to.y}" stroke="${color}" stroke-width="1.4" stroke-opacity="0.85"/>`);
     parts.push(`<circle cx="${to.x}" cy="${to.y}" r="1.8" fill="${color}"/>`);
@@ -710,11 +752,13 @@ function thStyle(){ return 'text-align:center;padding:6px 4px;border-bottom:1px 
 function tdStyle(){ return 'text-align:center;padding:6px 4px;border-bottom:1px solid var(--line);'; }
  
 function exportCSV(match){
-  let rows = [['Satz','Rally','Team','Skill','Spieler','Bewertung','VonPosition','ZielZone']];
+  let rows = [['Satz','Rally','Team','Skill','Spieler','Bewertung','Von(x,y)','Ziel(x,y)']];
   match.sets.forEach(set=>{
     set.rallies.forEach((rally,ri)=>{
       rally.actions.forEach(a=>{
-        rows.push([set.setNumber, ri+1, a.team==='home'?state.teamName:match.opponentName, SKILL_MAP[a.skill].label, playerName(a.team,a.playerId,match), a.code, a.fromZone||'', a.toZone||'']);
+        const from = a.fromPoint ? (a.fromPoint.x+','+a.fromPoint.y) : '';
+        const to = a.toPoint ? (a.toPoint.x+','+a.toPoint.y) : '';
+        rows.push([set.setNumber, ri+1, a.team==='home'?state.teamName:match.opponentName, SKILL_MAP[a.skill].label, playerName(a.team,a.playerId,match), a.code, from, to]);
       });
     });
   });
