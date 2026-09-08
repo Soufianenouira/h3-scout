@@ -2,9 +2,9 @@
    H3 Scout — Volleyball Live-Scouting PWA
    Reines Vanilla JS, keine externen Abhängigkeiten, offlinefähig.
    ============================================================ */
- 
+
 const STORAGE_KEY = 'h3scout_v1';
- 
+
 const SKILLS = [
   {code:'S', label:'Aufschlag', short:'Serve'},
   {code:'R', label:'Annahme', short:'Reception'},
@@ -14,7 +14,7 @@ const SKILLS = [
   {code:'E', label:'Zuspiel', short:'Set'},
 ];
 const SKILL_MAP = Object.fromEntries(SKILLS.map(s=>[s.code,s]));
- 
+
 // Bewertungsskala (vereinfacht, angelehnt an Data Volley / Click&Scout)
 const EVALS = [
   {code:'#', label:'Perfekt',  cls:'ev-perfect'},
@@ -25,9 +25,9 @@ const EVALS = [
 ];
 // Codes, bei denen eine '#' direkt einen Punkt für das agierende Team bedeutet
 const POINT_ON_PERFECT = ['S','A','B'];
- 
+
 const POSITIONS = [1,2,3,4,5,6]; // FIVB-Rotationspositionen
- 
+
 // Richtungserfassung (wer schlägt wohin) — nur für Aufschlag und Angriff
 const ZONE_SKILLS = ['S','A'];
 // Court-Koordinatensystem: 0–100 (Breite) x 0–130 (Länge), Netz bei y=65.
@@ -47,14 +47,16 @@ function originFor(team, playerId, skillCode, set){
   const pos = playerPosition(team, playerId, set) || 3;
   return positionCoord(team, pos);
 }
- 
+
 let state = loadState();
 let route = {name:'home'};
 // Live-Match Arbeitszustand (nicht persistiert bis Rally abgeschlossen)
 let live = null;
- 
+// Laufende Aktions-Erfassung im Spielfeld: {skillCode, team, playerId, toPoint} oder null (kein Tagging aktiv)
+let tagging = null;
+
 function uid(){ return Math.random().toString(36).slice(2,10)+Date.now().toString(36); }
- 
+
 function loadState(){
   try{
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -65,10 +67,10 @@ function loadState(){
 function saveState(){
   try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }catch(e){}
 }
- 
+
 function getMatch(id){ return state.matches.find(m=>m.id===id); }
 function currentSet(match){ return match.sets[match.sets.length-1]; }
- 
+
 function setsToWin(bestOf){ return bestOf===3?2:3; }
 function isDecidingSet(match){
   const win = setsToWin(match.bestOf);
@@ -77,12 +79,12 @@ function isDecidingSet(match){
   return (match.sets.length === (match.bestOf)) || (homeWins===win-1 && awayWins===win-1);
 }
 function pointsToWinSet(match){ return isDecidingSet(match) ? 15 : 25; }
- 
+
 function rotate(lineup){
   // Sideout-Rotation im Uhrzeigersinn: Pos1 <- Pos2 <- Pos3 ... <- Pos6 <- Pos1
   return [lineup[1],lineup[2],lineup[3],lineup[4],lineup[5],lineup[0]];
 }
- 
+
 function playerName(team, playerId, match){
   if(team==='home'){
     const p = state.roster.find(r=>r.id===playerId);
@@ -107,9 +109,9 @@ function playerPosition(team, playerId, set){
   const idx = lineup.indexOf(playerId);
   return idx===-1 ? null : idx+1;
 }
- 
+
 /* ============================ Rendering-Kern ============================ */
- 
+
 function el(tag, attrs={}, children=[]){
   const e = document.createElement(tag);
   for(const k in attrs){
@@ -124,7 +126,7 @@ function el(tag, attrs={}, children=[]){
   });
   return e;
 }
- 
+
 function svgEl(tag, attrs={}, children=[]){
   const e = document.createElementNS('http://www.w3.org/2000/svg', tag);
   for(const k in attrs){
@@ -134,7 +136,7 @@ function svgEl(tag, attrs={}, children=[]){
   (Array.isArray(children)?children:[children]).forEach(c=>{ if(c!=null) e.appendChild(c); });
   return e;
 }
- 
+
 // Interaktives Spielfeld: zeigt beide Aufstellungen als Kreise auf einem echten Court.
 // opts: selectableTeam ('home'|'away'|'both'|null), onSelectPlayer(team,pid), selectedPlayerId,
 //       onTapTarget(x,y), previewFrom{x,y}, previewTo{x,y}, previewColor
@@ -146,7 +148,7 @@ function buildCourt(set, match, opts={}){
   [34,66].forEach(x=>{
     svg.appendChild(svgEl('line',{x1:x,y1:2,x2:x,y2:128,stroke:'#e8f5ea','stroke-width':0.4,'stroke-opacity':0.5}));
   });
- 
+
   if(opts.onTapTarget){
     const hit = svgEl('rect',{x:2,y:2,width:96,height:126,fill:'transparent', style:'cursor:crosshair'});
     hit.addEventListener('click', (ev)=>{
@@ -157,13 +159,13 @@ function buildCourt(set, match, opts={}){
     });
     svg.appendChild(hit);
   }
- 
+
   if(opts.previewFrom && opts.previewTo){
     const c = opts.previewColor||'#facc15';
     svg.appendChild(svgEl('line',{x1:opts.previewFrom.x,y1:opts.previewFrom.y,x2:opts.previewTo.x,y2:opts.previewTo.y, stroke:c,'stroke-width':1.6,'stroke-dasharray':'3,2'}));
     svg.appendChild(svgEl('circle',{cx:opts.previewTo.x,cy:opts.previewTo.y,r:2.4,fill:c}));
   }
- 
+
   ['home','away'].forEach(team=>{
     const lineup = team==='home' ? set.homeLineup : set.awayLineup;
     const teamColor = team==='home' ? '#3b82f6' : '#ef4444';
@@ -189,37 +191,37 @@ function buildCourt(set, match, opts={}){
   });
   return svg;
 }
- 
-function go(r){ route = r; render(); window.scrollTo(0,0); }
- 
+
+function go(r){ tagging = null; route = r; render(); window.scrollTo(0,0); }
+
 function render(){
   const app = document.getElementById('app');
   app.innerHTML = '';
   const header = el('header',{class:'topbar'});
   const main = el('main');
   app.appendChild(header); app.appendChild(main);
- 
+
   if(route.name==='home') return renderHome(header, main);
   if(route.name==='roster') return renderRoster(header, main);
   if(route.name==='newMatch') return renderNewMatch(header, main);
   if(route.name==='live') return renderLive(header, main);
   if(route.name==='stats') return renderStats(header, main);
 }
- 
+
 /* ============================ Home ============================ */
- 
+
 function renderHome(header, main){
   header.appendChild(el('h1',{},'H3 Scout'));
   const settingsBtn = el('button',{class:'icon-btn', onclick:()=>go({name:'roster'})}, '⚙');
   header.appendChild(settingsBtn);
- 
+
   const card = el('div', {class:'card'});
   card.appendChild(el('h2',{}, state.teamName));
   card.appendChild(el('div',{class:'row'},[
     el('button',{class:'btn block', onclick:()=>go({name:'newMatch'})}, '+ Neues Spiel'),
   ]));
   main.appendChild(card);
- 
+
   const listCard = el('div',{class:'card'});
   listCard.appendChild(el('h2',{},'Spiele'));
   if(state.matches.length===0){
@@ -241,20 +243,20 @@ function renderHome(header, main){
   }
   main.appendChild(listCard);
 }
- 
+
 /* ============================ Roster ============================ */
- 
+
 function renderRoster(header, main){
   header.appendChild(el('button',{class:'back', onclick:()=>go({name:'home'})},'← Zurück'));
   header.appendChild(el('h1',{},'Mannschaft'));
- 
+
   const teamCard = el('div',{class:'card'});
   teamCard.appendChild(el('h2',{},'Vereinsname'));
   const nameInput = el('input',{value:state.teamName});
   nameInput.addEventListener('change', e=>{ state.teamName=e.target.value; saveState(); });
   teamCard.appendChild(nameInput);
   main.appendChild(teamCard);
- 
+
   const card = el('div',{class:'card'});
   card.appendChild(el('h2',{},'Kader'));
   state.roster.slice().sort((a,b)=>a.number-b.number).forEach(p=>{
@@ -265,7 +267,7 @@ function renderRoster(header, main){
     card.appendChild(row);
   });
   if(state.roster.length===0) card.appendChild(el('div',{class:'empty'},'Noch keine Spielerinnen/Spieler.'));
- 
+
   const form = el('div',{style:'margin-top:14px; border-top:1px solid var(--line); padding-top:14px;'});
   const numI = el('input',{type:'number', placeholder:'Nr.'});
   const nameI = el('input',{placeholder:'Name'});
@@ -289,13 +291,13 @@ function renderRoster(header, main){
   card.appendChild(form);
   main.appendChild(card);
 }
- 
+
 /* ============================ Neues Spiel ============================ */
- 
+
 function renderNewMatch(header, main){
   header.appendChild(el('button',{class:'back', onclick:()=>go({name:'home'})},'← Zurück'));
   header.appendChild(el('h1',{},'Neues Spiel'));
- 
+
   if(state.roster.length < 6){
     main.appendChild(el('div',{class:'card'},[
       el('h2',{},'Kader zu klein'),
@@ -304,15 +306,15 @@ function renderNewMatch(header, main){
     ]));
     return;
   }
- 
+
   const setup = { opponentName:'', bestOf:5, opponentPlayers:[], homeLineup:Array(6).fill(''), awayLineup:Array(6).fill(''), servingTeam:'home' };
- 
+
   const card = el('div',{class:'card'});
   card.appendChild(el('h2',{},'Gegner'));
   const oppName = el('input',{placeholder:'Name des Gegners'});
   oppName.addEventListener('input', e=> setup.opponentName = e.target.value);
   card.appendChild(el('label',{},'Gegner-Team')); card.appendChild(oppName);
- 
+
   card.appendChild(el('label',{},'Modus'));
   const bestOfSel = el('select',{},[
     el('option',{value:'5'},'Best of 5'),
@@ -320,7 +322,7 @@ function renderNewMatch(header, main){
   ]);
   bestOfSel.addEventListener('change', e=> setup.bestOf = Number(e.target.value));
   card.appendChild(bestOfSel);
- 
+
   card.appendChild(el('label',{},'Wer schlägt zuerst auf?'));
   const serveSel = el('select',{},[
     el('option',{value:'home'}, state.teamName),
@@ -329,7 +331,7 @@ function renderNewMatch(header, main){
   serveSel.addEventListener('change', e=> setup.servingTeam = e.target.value);
   card.appendChild(serveSel);
   main.appendChild(card);
- 
+
   // Gegner-Kader (einfach: Nummern kommagetrennt)
   const oppCard = el('div',{class:'card'});
   oppCard.appendChild(el('h2',{},'Gegner-Trikotnummern'));
@@ -337,17 +339,17 @@ function renderNewMatch(header, main){
   const oppNums = el('input',{placeholder:'z.B. 1,3,4,7,9,12,14'});
   oppCard.appendChild(oppNums);
   main.appendChild(oppCard);
- 
+
   // Aufstellung
   const lineupCard = el('div',{class:'card'});
   lineupCard.appendChild(el('h2',{},'Startaufstellung'));
   lineupCard.appendChild(el('div',{style:'color:var(--muted);font-size:13px;margin-bottom:8px;'},'Position 1 = Aufschlag. Positionen im Uhrzeigersinn (1→6→5→4→3→2).'));
- 
+
   const homeGrid = el('div',{class:'grid2'});
   const awayGrid = el('div',{class:'grid2'});
- 
+
   const sortedRoster = state.roster.slice().sort((a,b)=>a.number-b.number);
- 
+
   function buildHomeSelect(posIdx){
     const sel = el('select',{},[el('option',{value:''},'Pos '+(posIdx+1)), ...sortedRoster.map(p=>el('option',{value:p.id},'#'+p.number+' '+p.name))]);
     sel.addEventListener('change', e=>{ setup.homeLineup[posIdx]=e.target.value; });
@@ -359,7 +361,7 @@ function renderNewMatch(header, main){
     sel.dataset.away='1';
     return sel;
   }
- 
+
   POSITIONS.forEach(p=>{
     const box = el('div',{},[ el('label',{}, state.teamName+' · Pos '+p), buildHomeSelect(p-1) ]);
     homeGrid.appendChild(box);
@@ -368,13 +370,13 @@ function renderNewMatch(header, main){
     const box = el('div',{},[ el('label',{}, 'Gegner · Pos '+p), buildAwaySelect(p-1) ]);
     awayGrid.appendChild(box);
   });
- 
+
   lineupCard.appendChild(el('div',{style:'font-weight:700;margin-top:6px;'},state.teamName));
   lineupCard.appendChild(homeGrid);
   lineupCard.appendChild(el('div',{style:'font-weight:700;margin-top:16px;'},'Gegner'));
   lineupCard.appendChild(awayGrid);
   main.appendChild(lineupCard);
- 
+
   oppNums.addEventListener('change', ()=>{
     const nums = oppNums.value.split(',').map(s=>s.trim()).filter(Boolean);
     // Bestehende IDs für bereits vorhandene Nummern wiederverwenden, damit eine
@@ -391,12 +393,12 @@ function renderNewMatch(header, main){
       if(cur) sel.value=cur;
     });
   });
- 
+
   const startBtn = el('button',{class:'btn block', style:'margin-top:6px', onclick:()=>{
     if(!setup.opponentName){ alert('Bitte Gegnernamen eingeben.'); return; }
     if(setup.opponentPlayers.length<6){ alert('Bitte mindestens 6 Gegner-Trikotnummern eingeben.'); return; }
     if(setup.homeLineup.some(x=>!x) || setup.awayLineup.some(x=>!x)){ alert('Bitte alle 6 Positionen für beide Teams festlegen.'); return; }
- 
+
     const match = {
       id:uid(), date:Date.now(), opponentName:setup.opponentName, bestOf:setup.bestOf,
       opponentRoster: setup.opponentPlayers, status:'in_progress',
@@ -407,23 +409,23 @@ function renderNewMatch(header, main){
   }},'Spiel starten');
   main.appendChild(startBtn);
 }
- 
+
 function newSet(setNumber, homeLineup, awayLineup, servingTeam){
   return { setNumber, homeScore:0, awayScore:0, homeLineup:[...homeLineup], awayLineup:[...awayLineup], servingTeam, rallies:[{actions:[]}], winner:null };
 }
- 
+
 /* ============================ Live-Scouting ============================ */
- 
+
 function renderLive(header, main){
   const match = getMatch(route.matchId);
   if(!match){ go({name:'home'}); return; }
   const set = currentSet(match);
   const rally = set.rallies[set.rallies.length-1];
- 
+
   header.appendChild(el('button',{class:'back', onclick:()=>go({name:'home'})},'← Spiele'));
   header.appendChild(el('h1',{}, state.teamName+' – '+match.opponentName));
   header.appendChild(el('button',{class:'icon-btn', onclick:()=>go({name:'stats', matchId:match.id})},'📊'));
- 
+
   // Scoreboard
   const board = el('div',{class:'card'});
   const homeSets = match.sets.filter(s=>s.winner==='home').length;
@@ -445,13 +447,11 @@ function renderLive(header, main){
   ]));
   board.appendChild(el('button',{class:'btn ghost block', style:'margin-top:8px', onclick:()=>undoLastAction(match)},'↩ Letzte Aktion rückgängig'));
   main.appendChild(board);
- 
-  // Spielfeld mit beiden Aufstellungen
-  const fieldCard = el('div',{class:'card'});
-  fieldCard.appendChild(el('h2',{}, 'Spielfeld  ·  Blau: '+state.teamName+'  ·  Rot: '+match.opponentName));
-  fieldCard.appendChild(buildCourt(set, match, {}));
-  main.appendChild(fieldCard);
- 
+
+  // Spielfeld: zeigt die Aufstellung UND dient direkt zum Erfassen einer Aktion —
+  // kein separates/extra Feld mehr, alles läuft in dieser einen Karte.
+  fieldSection(main, match, set);
+
   // Aktionen dieser Rally
   const rallyCard = el('div',{class:'card'});
   rallyCard.appendChild(el('h2',{},'Aktuelle Rally'));
@@ -463,86 +463,76 @@ function renderLive(header, main){
     ]));
   });
   main.appendChild(rallyCard);
- 
-  // Aktions-Buttons
-  const actionCard = el('div',{class:'card'});
-  actionCard.appendChild(el('h2',{},'Aktion erfassen'));
-  const skillGrid = el('div',{class:'row'});
-  SKILLS.forEach(sk=>{
-    skillGrid.appendChild(el('button',{class:'btn secondary', style:'flex:1 1 30%;', onclick:()=>openActionPanel(match, sk.code)}, sk.label));
-  });
-  actionCard.appendChild(skillGrid);
-  main.appendChild(actionCard);
- 
-  const panelHolder = el('div',{id:'actionPanel'});
-  main.appendChild(panelHolder);
- 
+
+  // Statistik & Diagramme sind während des ganzen Spiels/Satzes durchgehend sichtbar,
+  // nicht nur über die separate Statistik-Seite.
+  main.appendChild(el('div',{style:'font-weight:800;font-size:15px;margin:18px 4px 4px;color:var(--muted);'},'📊 Statistik (live)'));
+  renderStatTables(main, match);
+  renderDirections(main, match);
+
   const endCard = el('div',{class:'card'});
   endCard.appendChild(el('button',{class:'btn ghost block', onclick:()=>{
     if(confirm('Spiel wirklich beenden und speichern?')){ match.status='finished'; saveState(); go({name:'stats', matchId:match.id}); }
   }},'Spiel beenden'));
   main.appendChild(endCard);
 }
- 
-function openActionPanel(match, skillCode){
-  const set = currentSet(match);
-  const skill = SKILL_MAP[skillCode];
-  const holder = document.getElementById('actionPanel');
-  holder.innerHTML='';
- 
-  // Bei Aufschlag/Annahme ist das Team durch die Spielsituation vorgegeben (nur diese Seite antippbar).
-  // Bei den anderen Aktionen kann auf beiden Seiten des Feldes ein Spieler angetippt werden.
-  const fixedTeam = skillCode==='S' ? set.servingTeam : (skillCode==='R' ? (set.servingTeam==='home'?'away':'home') : null);
-  const state_panel = { team:null, playerId:'', toPoint:null };
- 
-  const card = el('div',{class:'card'});
-  const needsTarget = ZONE_SKILLS.includes(skillCode);
-  card.appendChild(el('h2',{}, skill.label+' erfassen'));
-  const hint = el('div',{style:'color:var(--muted);font-size:12px;margin-bottom:8px;'});
-  card.appendChild(hint);
- 
-  const courtHolder = el('div',{});
-  card.appendChild(courtHolder);
- 
-  function currentOrigin(){
-    if(!state_panel.playerId) return null;
-    return originFor(state_panel.team, state_panel.playerId, skillCode, set);
-  }
- 
-  function renderCourt(){
-    hint.textContent = !state_panel.playerId
-      ? 'Auf den Spieler im Feld tippen, der die Aktion ausgeführt hat.'
-      : (needsTarget && !state_panel.toPoint ? 'Jetzt auf die Stelle im Feld tippen, wohin gespielt wurde.' : 'Bewertung wählen (oder erneut tippen, um Auswahl zu ändern).');
-    courtHolder.innerHTML='';
-    const svg = buildCourt(set, match, {
-      selectableTeam: fixedTeam || 'both',
-      onSelectPlayer: (team,pid)=>{ state_panel.team=team; state_panel.playerId=pid; state_panel.toPoint=null; renderCourt(); },
-      selectedPlayerId: state_panel.playerId,
-      onTapTarget: (needsTarget && state_panel.playerId) ? (x,y)=>{ state_panel.toPoint={x,y}; renderCourt(); } : null,
-      previewFrom: (needsTarget && state_panel.playerId) ? currentOrigin() : null,
-      previewTo: state_panel.toPoint,
-      previewColor: '#facc15'
+
+// Einzige Spielfeld-Karte: zeigt im Ruhezustand die Aufstellung + die 6 Aktions-Buttons;
+// sobald eine Aktion gewählt ist, wird dasselbe Feld interaktiv (Spieler antippen, dann
+// bei Aufschlag/Angriff den Zielort antippen), gefolgt von der Bewertung — alles in einem Feld.
+function fieldSection(main, match, set){
+  const fieldCard = el('div',{class:'card'});
+  fieldCard.appendChild(el('h2',{}, 'Spielfeld  ·  Blau: '+state.teamName+'  ·  Rot: '+match.opponentName));
+
+  if(!tagging){
+    fieldCard.appendChild(el('div',{style:'color:var(--muted);font-size:12px;margin-bottom:8px;'}, 'Aktion wählen, dann direkt hier im Feld auf Spieler (und ggf. Zielort) tippen.'));
+    fieldCard.appendChild(buildCourt(set, match, {}));
+    const skillGrid = el('div',{class:'row', style:'margin-top:10px;'});
+    SKILLS.forEach(sk=>{
+      skillGrid.appendChild(el('button',{class:'btn secondary', style:'flex:1 1 30%;', onclick:()=>{ tagging = {skillCode:sk.code, team:null, playerId:'', toPoint:null}; render(); }}, sk.label));
     });
-    courtHolder.appendChild(svg);
+    fieldCard.appendChild(skillGrid);
+  } else {
+    const skill = SKILL_MAP[tagging.skillCode];
+    const needsTarget = ZONE_SKILLS.includes(tagging.skillCode);
+    // Bei Aufschlag/Annahme ist das Team durch die Spielsituation vorgegeben (nur diese Seite antippbar).
+    const fixedTeam = tagging.skillCode==='S' ? set.servingTeam : (tagging.skillCode==='R' ? (set.servingTeam==='home'?'away':'home') : null);
+
+    const hint = el('div',{style:'color:var(--accent);font-weight:600;font-size:13px;margin-bottom:8px;'},
+      skill.label+' erfassen: ' + (!tagging.playerId
+        ? 'Auf den Spieler im Feld tippen, der die Aktion ausgeführt hat.'
+        : (needsTarget && !tagging.toPoint ? 'Jetzt auf die Stelle im Feld tippen, wohin gespielt wurde.' : 'Bewertung wählen (oder erneut tippen, um Auswahl zu ändern).')));
+    fieldCard.appendChild(hint);
+
+    const origin = tagging.playerId ? originFor(tagging.team, tagging.playerId, tagging.skillCode, set) : null;
+    fieldCard.appendChild(buildCourt(set, match, {
+      selectableTeam: fixedTeam || 'both',
+      onSelectPlayer: (team,pid)=>{ tagging.team=team; tagging.playerId=pid; tagging.toPoint=null; render(); },
+      selectedPlayerId: tagging.playerId,
+      onTapTarget: (needsTarget && tagging.playerId) ? (x,y)=>{ tagging.toPoint={x,y}; render(); } : null,
+      previewFrom: (needsTarget && tagging.playerId) ? origin : null,
+      previewTo: tagging.toPoint,
+      previewColor: '#facc15'
+    }));
+
+    const evalRow = el('div',{class:'row eval-row', style:'margin-top:10px;'});
+    EVALS.forEach(ev=>{
+      evalRow.appendChild(el('button',{class:'btn secondary '+ev.cls, style:'flex:1 1 18%;', onclick:()=>{
+        if(!tagging.playerId){ alert('Bitte zuerst im Feld auf einen Spieler tippen.'); return; }
+        if(needsTarget && !tagging.toPoint){ alert('Bitte Zielort im Feld antippen.'); return; }
+        const t = tagging;
+        tagging = null;
+        logAction(match, t.skillCode, t.team, t.playerId, ev.code, t.toPoint);
+      }}, ev.code+' '+ev.label));
+    });
+    fieldCard.appendChild(el('label',{},'Bewertung'));
+    fieldCard.appendChild(evalRow);
+    fieldCard.appendChild(el('button',{class:'btn ghost block', style:'margin-top:10px', onclick:()=>{ tagging=null; render(); }},'Abbrechen'));
   }
-  renderCourt();
- 
-  const evalRow = el('div',{class:'row eval-row', style:'margin-top:10px;'});
-  EVALS.forEach(ev=>{
-    evalRow.appendChild(el('button',{class:'btn secondary '+ev.cls, style:'flex:1 1 18%;', onclick:()=>{
-      if(!state_panel.playerId){ alert('Bitte zuerst im Feld auf einen Spieler tippen.'); return; }
-      if(needsTarget && !state_panel.toPoint){ alert('Bitte Zielort im Feld antippen.'); return; }
-      logAction(match, skillCode, state_panel.team, state_panel.playerId, ev.code, state_panel.toPoint);
-      holder.innerHTML='';
-    }}, ev.code+' '+ev.label));
-  });
-  card.appendChild(el('label',{},'Bewertung'));
-  card.appendChild(evalRow);
- 
-  card.appendChild(el('button',{class:'btn ghost block', style:'margin-top:10px', onclick:()=>{ holder.innerHTML=''; }},'Abbrechen'));
-  holder.appendChild(card);
+
+  main.appendChild(fieldCard);
 }
- 
+
 function logAction(match, skillCode, team, playerId, code, toPoint){
   const set = currentSet(match);
   const rally = set.rallies[set.rallies.length-1];
@@ -553,7 +543,7 @@ function logAction(match, skillCode, team, playerId, code, toPoint){
   }
   rally.actions.push(action);
   saveState();
- 
+
   if(code==='='){
     closeRally(match, team==='home'?'away':'home');
   } else if(code==='#' && POINT_ON_PERFECT.includes(skillCode)){
@@ -562,19 +552,19 @@ function logAction(match, skillCode, team, playerId, code, toPoint){
     render();
   }
 }
- 
+
 function closeRally(match, pointTo){
   const set = currentSet(match);
   const wasServing = set.servingTeam;
   if(pointTo==='home') set.homeScore++; else set.awayScore++;
- 
+
   if(pointTo!==wasServing){
     // Seitenwechsel: Team, das den Punkt gewinnt (und nicht aufgeschlagen hat), rotiert und bekommt Aufschlag
     if(pointTo==='home') set.homeLineup = rotate(set.homeLineup);
     else set.awayLineup = rotate(set.awayLineup);
     set.servingTeam = pointTo;
   }
- 
+
   const target = pointsToWinSet(match);
   const lead = Math.abs(set.homeScore-set.awayScore);
   if((set.homeScore>=target || set.awayScore>=target) && lead>=2){
@@ -602,11 +592,11 @@ function closeRally(match, pointTo){
   }
   render();
 }
- 
+
 function manualPoint(match, team){
   closeRally(match, team);
 }
- 
+
 function undoLastAction(match){
   const set = currentSet(match);
   const rally = set.rallies[set.rallies.length-1];
@@ -621,9 +611,9 @@ function undoLastAction(match){
     alert('Nichts zum Rückgängigmachen in dieser Rally.');
   }
 }
- 
+
 /* ============================ Statistik ============================ */
- 
+
 function computeStats(match){
   const stats = { home:{}, away:{} };
   ['home','away'].forEach(team=>{
@@ -649,7 +639,22 @@ function computeStats(match){
   });
   return stats;
 }
- 
+
+// Alle Richtungslinien eines Teams zusammen (unabhängig vom einzelnen Spieler) —
+// für das neue Team-Gesamtdiagramm (eines für uns, eines für den Gegner).
+function computeTeamDirections(match){
+  const dirs = { home:{lines:[]}, away:{lines:[]} };
+  match.sets.forEach(set=>{
+    set.rallies.forEach(rally=>{
+      rally.actions.forEach(a=>{
+        if(!ZONE_SKILLS.includes(a.skill) || !a.toPoint || !a.fromPoint) return;
+        dirs[a.team].lines.push({ skill:a.skill, fromPoint:a.fromPoint, toPoint:a.toPoint, code:a.code });
+      });
+    });
+  });
+  return dirs;
+}
+
 function computeDirections(match){
   const dirs = { home:{}, away:{} };
   match.sets.forEach(set=>{
@@ -664,7 +669,7 @@ function computeDirections(match){
   });
   return dirs;
 }
- 
+
 function directionSVG(playerDirs){
   const parts = [];
   parts.push('<rect x="2" y="2" width="96" height="126" fill="none" stroke="#3a4a6b" stroke-width="1"/>');
@@ -677,27 +682,39 @@ function directionSVG(playerDirs){
   });
   return `<svg viewBox="0 0 100 130" style="width:100%;height:auto;background:var(--bg2);border-radius:8px;display:block;">${parts.join('')}</svg>`;
 }
- 
+
 function renderDirections(main, match){
   const dirs = computeDirections(match);
+  const teamDirs = computeTeamDirections(match);
   ['home','away'].forEach(team=>{
+    const teamName = team==='home'?state.teamName:match.opponentName;
+    const teamLines = teamDirs[team].lines;
     const entries = Object.entries(dirs[team]).filter(([id,d])=>d.lines.length>0);
-    if(entries.length===0) return;
+    if(entries.length===0 && teamLines.length===0) return;
     const card = el('div',{class:'card printable'});
-    card.appendChild(el('h2',{}, 'Richtungen (Aufschlag/Angriff) · '+(team==='home'?state.teamName:match.opponentName)));
-    const grid = el('div',{style:'display:grid; grid-template-columns:repeat(auto-fill,minmax(130px,1fr)); gap:12px;'});
-    entries.sort((a,b)=> (a[1].number>b[1].number?1:-1)).forEach(([pid,d])=>{
-      const box = el('div',{});
-      box.appendChild(el('div',{style:'font-size:12px;color:var(--muted);margin-bottom:4px;text-align:center;'}, '#'+d.number));
-      box.appendChild(el('div',{html: directionSVG(d)}));
-      grid.appendChild(box);
-    });
-    card.appendChild(grid);
+    card.appendChild(el('h2',{}, 'Richtungen (Aufschlag/Angriff) · '+teamName));
+
+    if(teamLines.length>0){
+      card.appendChild(el('div',{style:'font-size:12px;color:var(--muted);margin-bottom:4px;text-align:center;font-weight:700;'}, 'Team gesamt · '+teamName));
+      card.appendChild(el('div',{style:'max-width:220px;margin:0 auto 16px;'}, el('div',{html: directionSVG({lines:teamLines})})));
+    }
+
+    if(entries.length>0){
+      card.appendChild(el('div',{style:'font-size:12px;color:var(--muted);margin-bottom:6px;text-align:center;'}, 'Pro Spieler'));
+      const grid = el('div',{style:'display:grid; grid-template-columns:repeat(auto-fill,minmax(130px,1fr)); gap:12px;'});
+      entries.sort((a,b)=> (a[1].number>b[1].number?1:-1)).forEach(([pid,d])=>{
+        const box = el('div',{});
+        box.appendChild(el('div',{style:'font-size:12px;color:var(--muted);margin-bottom:4px;text-align:center;'}, '#'+d.number));
+        box.appendChild(el('div',{html: directionSVG(d)}));
+        grid.appendChild(box);
+      });
+      card.appendChild(grid);
+    }
     card.appendChild(el('div',{style:'color:var(--muted); font-size:11px; margin-top:8px;'},'Linie = Aufschlag- bzw. Angriffsrichtung (unten = eigene Seite, oben = Gegnerfeld). Grün = Punkt/gut, Grau = weiter, Rot = Fehler.'));
     main.appendChild(card);
   });
 }
- 
+
 function renderStats(header, main){
   const match = getMatch(route.matchId);
   if(!match){ go({name:'home'}); return; }
@@ -706,7 +723,7 @@ function renderStats(header, main){
   if(match.status!=='finished'){
     header.appendChild(el('button',{class:'icon-btn', onclick:()=>go({name:'live', matchId:match.id})},'🏐'));
   }
- 
+
   const homeSets = match.sets.filter(s=>s.winner==='home').length;
   const awaySets = match.sets.filter(s=>s.winner==='away').length;
   const summary = el('div',{class:'card'});
@@ -720,7 +737,14 @@ function renderStats(header, main){
     el('button',{class:'btn secondary', style:'flex:1', onclick:()=>window.print()},'Als PDF drucken'),
   ]));
   main.appendChild(summary);
- 
+
+  renderStatTables(main, match);
+  renderDirections(main, match);
+}
+
+// Statistik-Tabellen pro Team — wird sowohl auf der eigenen Statistik-Seite als auch
+// live während des Spiels (in renderLive) verwendet, damit nichts doppelt gepflegt wird.
+function renderStatTables(main, match){
   const stats = computeStats(match);
   ['home','away'].forEach(team=>{
     const card = el('div',{class:'card printable'});
@@ -745,12 +769,10 @@ function renderStats(header, main){
     card.appendChild(el('div',{style:'color:var(--muted); font-size:11px; margin-top:8px;'},'Zahlen = Aktionen gesamt, Klammer = Effizienz ((Perfekt−Fehler)/Aktionen). S=Aufschlag R=Annahme A=Angriff B=Block D=Abwehr E=Zuspiel.'));
     main.appendChild(card);
   });
- 
-  renderDirections(main, match);
 }
 function thStyle(){ return 'text-align:center;padding:6px 4px;border-bottom:1px solid var(--line);color:var(--muted);font-weight:600;'; }
 function tdStyle(){ return 'text-align:center;padding:6px 4px;border-bottom:1px solid var(--line);'; }
- 
+
 function exportCSV(match){
   let rows = [['Satz','Rally','Team','Skill','Spieler','Bewertung','Von(x,y)','Ziel(x,y)']];
   match.sets.forEach(set=>{
@@ -770,11 +792,11 @@ function exportCSV(match){
   document.body.appendChild(a); a.click(); a.remove();
   URL.revokeObjectURL(url);
 }
- 
+
 /* ============================ Start ============================ */
- 
+
 render();
- 
+
 if('serviceWorker' in navigator){
   window.addEventListener('load', ()=>{
     navigator.serviceWorker.register('sw.js').catch(()=>{});
