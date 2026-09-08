@@ -52,8 +52,10 @@ let state = loadState();
 let route = {name:'home'};
 // Live-Match Arbeitszustand (nicht persistiert bis Rally abgeschlossen)
 let live = null;
-// Laufende Aktions-Erfassung im Spielfeld: {skillCode, team, playerId, toPoint} oder null (kein Tagging aktiv)
+// Laufende Aktions-Erfassung im Spielfeld: {skillCode, team, playerId, fromPoint, toPoint} oder null (kein Tagging aktiv)
 let tagging = null;
+// Laufender Wechsel-Dialog: {team, posIdx, newPlayerId} oder null (kein Wechsel-Dialog offen)
+let subbing = null;
 
 function uid(){ return Math.random().toString(36).slice(2,10)+Date.now().toString(36); }
 
@@ -137,11 +139,20 @@ function svgEl(tag, attrs={}, children=[]){
   return e;
 }
 
-// Interaktives Spielfeld: zeigt beide Aufstellungen als Kreise auf einem echten Court.
+// Court-Koordinatensystem (unverändert, damit bereits gespeicherte Aktionen/Koordinaten gültig
+// bleiben): 0–100 (Breite) x 0–130 (Länge). Rundherum kommt zusätzlich eine Freizone ins Bild,
+// die man auch antippen kann (z. B. Aufschlagzone hinter der Grundlinie, Bälle im Aus).
+const ZONE_MARGIN = 22;
+
+// Interaktives Spielfeld: zeigt beide Aufstellungen als Kreise auf einem echten Court MIT Freizone.
 // opts: selectableTeam ('home'|'away'|'both'|null), onSelectPlayer(team,pid), selectedPlayerId,
 //       onTapTarget(x,y), previewFrom{x,y}, previewTo{x,y}, previewColor
 function buildCourt(set, match, opts={}){
-  const svg = svgEl('svg', {viewBox:'0 0 100 130', style:'width:100%;height:auto;display:block;background:#2b6e3f;border-radius:10px;touch-action:none;'});
+  const vx = -ZONE_MARGIN, vy = -ZONE_MARGIN, vw = 100+2*ZONE_MARGIN, vh = 130+2*ZONE_MARGIN;
+  const svg = svgEl('svg', {viewBox:`${vx} ${vy} ${vw} ${vh}`, style:'width:100%;height:auto;display:block;background:#1e293b;border-radius:10px;touch-action:none;'});
+  // Freizone (Bereich außerhalb der Spielfeldlinien, in dem z.B. der Aufschlag ausgeführt wird)
+  svg.appendChild(svgEl('rect',{x:vx,y:vy,width:vw,height:vh, fill:'#24324a'}));
+  // eigentliches Spielfeld
   svg.appendChild(svgEl('rect',{x:2,y:2,width:96,height:126,fill:'#3a8752',stroke:'#e8f5ea','stroke-width':1}));
   svg.appendChild(svgEl('line',{x1:2,y1:65,x2:98,y2:65,stroke:'#e8f5ea','stroke-width':1.8}));
   // Grund-Rasterlinien (3 Spalten je Feldhälfte) zur Orientierung
@@ -150,16 +161,21 @@ function buildCourt(set, match, opts={}){
   });
 
   if(opts.onTapTarget){
-    const hit = svgEl('rect',{x:2,y:2,width:96,height:126,fill:'transparent', style:'cursor:crosshair'});
+    // Die ganze Fläche inkl. Freizone ist antippbar (Aufschlagzone, Bälle im Aus, o.ä.)
+    const hit = svgEl('rect',{x:vx,y:vy,width:vw,height:vh, fill:'transparent', style:'cursor:crosshair'});
     hit.addEventListener('click', (ev)=>{
       const rect = svg.getBoundingClientRect();
-      const x = Math.max(3,Math.min(97, (ev.clientX-rect.left)/rect.width*100));
-      const y = Math.max(3,Math.min(127, (ev.clientY-rect.top)/rect.height*130));
+      const x = Math.max(vx+1, Math.min(vx+vw-1, (ev.clientX-rect.left)/rect.width*vw + vx));
+      const y = Math.max(vy+1, Math.min(vy+vh-1, (ev.clientY-rect.top)/rect.height*vh + vy));
       opts.onTapTarget(x,y);
     });
     svg.appendChild(hit);
   }
 
+  if(opts.previewFrom){
+    const c = opts.previewColor||'#facc15';
+    svg.appendChild(svgEl('circle',{cx:opts.previewFrom.x,cy:opts.previewFrom.y,r:2.6, fill:'none', stroke:c,'stroke-width':1.4}));
+  }
   if(opts.previewFrom && opts.previewTo){
     const c = opts.previewColor||'#facc15';
     svg.appendChild(svgEl('line',{x1:opts.previewFrom.x,y1:opts.previewFrom.y,x2:opts.previewTo.x,y2:opts.previewTo.y, stroke:c,'stroke-width':1.6,'stroke-dasharray':'3,2'}));
@@ -192,7 +208,7 @@ function buildCourt(set, match, opts={}){
   return svg;
 }
 
-function go(r){ tagging = null; route = r; render(); window.scrollTo(0,0); }
+function go(r){ tagging = null; subbing = null; route = r; render(); window.scrollTo(0,0); }
 
 function render(){
   const app = document.getElementById('app');
@@ -448,6 +464,9 @@ function renderLive(header, main){
   board.appendChild(el('button',{class:'btn ghost block', style:'margin-top:8px', onclick:()=>undoLastAction(match)},'↩ Letzte Aktion rückgängig'));
   main.appendChild(board);
 
+  // Wechsel: eine Spielerin/ein Spieler auf einer Position gegen jemanden von der Bank tauschen.
+  substitutionSection(main, match, set);
+
   // Spielfeld: zeigt die Aufstellung UND dient direkt zum Erfassen einer Aktion —
   // kein separates/extra Feld mehr, alles läuft in dieser einen Karte.
   fieldSection(main, match, set);
@@ -489,7 +508,7 @@ function fieldSection(main, match, set){
     fieldCard.appendChild(buildCourt(set, match, {}));
     const skillGrid = el('div',{class:'row', style:'margin-top:10px;'});
     SKILLS.forEach(sk=>{
-      skillGrid.appendChild(el('button',{class:'btn secondary', style:'flex:1 1 30%;', onclick:()=>{ tagging = {skillCode:sk.code, team:null, playerId:'', toPoint:null}; render(); }}, sk.label));
+      skillGrid.appendChild(el('button',{class:'btn secondary', style:'flex:1 1 30%;', onclick:()=>{ tagging = {skillCode:sk.code, team:null, playerId:'', fromPoint:null, toPoint:null}; render(); }}, sk.label));
     });
     fieldCard.appendChild(skillGrid);
   } else {
@@ -497,32 +516,40 @@ function fieldSection(main, match, set){
     const needsTarget = ZONE_SKILLS.includes(tagging.skillCode);
     // Bei Aufschlag/Annahme ist das Team durch die Spielsituation vorgegeben (nur diese Seite antippbar).
     const fixedTeam = tagging.skillCode==='S' ? set.servingTeam : (tagging.skillCode==='R' ? (set.servingTeam==='home'?'away':'home') : null);
+    const canEval = tagging.playerId && (!needsTarget || (tagging.fromPoint && tagging.toPoint));
 
-    const hint = el('div',{style:'color:var(--accent);font-weight:600;font-size:13px;margin-bottom:8px;'},
-      skill.label+' erfassen: ' + (!tagging.playerId
-        ? 'Auf den Spieler im Feld tippen, der die Aktion ausgeführt hat.'
-        : (needsTarget && !tagging.toPoint ? 'Jetzt auf die Stelle im Feld tippen, wohin gespielt wurde.' : 'Bewertung wählen (oder erneut tippen, um Auswahl zu ändern).')));
-    fieldCard.appendChild(hint);
+    let hintText;
+    if(!tagging.playerId) hintText = 'Auf den Spieler im Feld tippen, der die Aktion ausgeführt hat.';
+    else if(needsTarget && !tagging.fromPoint) hintText = 'Jetzt auf die Startposition tippen (wo der Ball gespielt wurde — auch in der Freizone möglich, z.B. Aufschlagzone).';
+    else if(needsTarget && !tagging.toPoint) hintText = 'Jetzt auf die Zielposition tippen (wohin gespielt wurde).';
+    else hintText = 'Bewertung wählen.';
+    fieldCard.appendChild(el('div',{style:'color:var(--accent);font-weight:600;font-size:13px;margin-bottom:8px;'}, skill.label+' erfassen: '+hintText));
 
-    const origin = tagging.playerId ? originFor(tagging.team, tagging.playerId, tagging.skillCode, set) : null;
     fieldCard.appendChild(buildCourt(set, match, {
       selectableTeam: fixedTeam || 'both',
-      onSelectPlayer: (team,pid)=>{ tagging.team=team; tagging.playerId=pid; tagging.toPoint=null; render(); },
+      onSelectPlayer: (team,pid)=>{ tagging.team=team; tagging.playerId=pid; tagging.fromPoint=null; tagging.toPoint=null; render(); },
       selectedPlayerId: tagging.playerId,
-      onTapTarget: (needsTarget && tagging.playerId) ? (x,y)=>{ tagging.toPoint={x,y}; render(); } : null,
-      previewFrom: (needsTarget && tagging.playerId) ? origin : null,
-      previewTo: tagging.toPoint,
+      onTapTarget: (needsTarget && tagging.playerId && !canEval) ? (x,y)=>{
+        if(!tagging.fromPoint) tagging.fromPoint={x,y}; else tagging.toPoint={x,y};
+        render();
+      } : null,
+      previewFrom: needsTarget ? tagging.fromPoint : null,
+      previewTo: needsTarget ? tagging.toPoint : null,
       previewColor: '#facc15'
     }));
+
+    if(needsTarget && tagging.playerId && (tagging.fromPoint || tagging.toPoint)){
+      fieldCard.appendChild(el('button',{class:'btn ghost block', style:'margin-top:6px;font-size:12px;', onclick:()=>{ tagging.fromPoint=null; tagging.toPoint=null; render(); }},'↺ Start-/Zielposition neu setzen'));
+    }
 
     const evalRow = el('div',{class:'row eval-row', style:'margin-top:10px;'});
     EVALS.forEach(ev=>{
       evalRow.appendChild(el('button',{class:'btn secondary '+ev.cls, style:'flex:1 1 18%;', onclick:()=>{
         if(!tagging.playerId){ alert('Bitte zuerst im Feld auf einen Spieler tippen.'); return; }
-        if(needsTarget && !tagging.toPoint){ alert('Bitte Zielort im Feld antippen.'); return; }
+        if(needsTarget && (!tagging.fromPoint || !tagging.toPoint)){ alert('Bitte Start- und Zielposition im Feld antippen.'); return; }
         const t = tagging;
         tagging = null;
-        logAction(match, t.skillCode, t.team, t.playerId, ev.code, t.toPoint);
+        logAction(match, t.skillCode, t.team, t.playerId, ev.code, t.fromPoint, t.toPoint);
       }}, ev.code+' '+ev.label));
     });
     fieldCard.appendChild(el('label',{},'Bewertung'));
@@ -533,13 +560,71 @@ function fieldSection(main, match, set){
   main.appendChild(fieldCard);
 }
 
-function logAction(match, skillCode, team, playerId, code, toPoint){
+// Wechsel: Spieler:in auf einer Feldposition gegen jemanden von der Bank tauschen. Der/die
+// Eingewechselte übernimmt genau den Rotationsplatz der/des Ausgewechselten, damit die Rotation
+// danach weiter korrekt nach den Volleyball-Regeln läuft.
+function substitutionSection(main, match, set){
+  const card = el('div',{class:'card'});
+  const headRow = el('div',{style:'display:flex;justify-content:space-between;align-items:center;gap:8px;'});
+  headRow.appendChild(el('h2',{style:'margin:0'},'Wechsel'));
+  headRow.appendChild(el('button',{class:'btn secondary', onclick:()=>{
+    subbing = subbing ? null : {team:'home', posIdx:0, newPlayerId:''};
+    render();
+  }}, subbing ? 'Schließen' : '🔄 Wechsel'));
+  card.appendChild(headRow);
+
+  if(subbing){
+    const teamSel = el('select',{},[
+      el('option',{value:'home'}, state.teamName),
+      el('option',{value:'away'}, match.opponentName),
+    ]);
+    teamSel.value = subbing.team;
+    teamSel.addEventListener('change', e=>{ subbing.team = e.target.value; subbing.posIdx = 0; subbing.newPlayerId=''; render(); });
+    card.appendChild(el('label',{style:'margin-top:8px'},'Team'));
+    card.appendChild(teamSel);
+
+    const lineup = subbing.team==='home' ? set.homeLineup : set.awayLineup;
+    const posSel = el('select',{}, lineup.map((pid,idx)=> el('option',{value:String(idx)}, 'Pos '+(idx+1)+' — '+playerName(subbing.team,pid,match))));
+    posSel.value = String(subbing.posIdx);
+    posSel.addEventListener('change', e=>{ subbing.posIdx = Number(e.target.value); render(); });
+    card.appendChild(el('label',{},'Position / Spieler:in raus'));
+    card.appendChild(posSel);
+
+    const bench = subbing.team==='home'
+      ? state.roster.filter(p=>!set.homeLineup.includes(p.id))
+      : match.opponentRoster.filter(p=>!set.awayLineup.includes(p.id));
+    const benchSel = el('select',{}, [el('option',{value:''},'Spieler:in wählen'), ...bench.map(p=>el('option',{value:p.id}, '#'+p.number+(p.name?(' '+p.name):'')))]);
+    benchSel.value = subbing.newPlayerId||'';
+    benchSel.addEventListener('change', e=>{ subbing.newPlayerId = e.target.value; });
+    card.appendChild(el('label',{},'Spieler:in rein (Bank)'));
+    card.appendChild(benchSel);
+
+    if(bench.length===0){
+      card.appendChild(el('div',{class:'empty'},'Keine weiteren Spieler:innen auf der Bank.'));
+    }
+
+    card.appendChild(el('button',{class:'btn block', style:'margin-top:10px', onclick:()=>{
+      if(!subbing.newPlayerId){ alert('Bitte eine Spielerin/einen Spieler von der Bank auswählen.'); return; }
+      const lu = subbing.team==='home' ? set.homeLineup : set.awayLineup;
+      lu[subbing.posIdx] = subbing.newPlayerId;
+      saveState();
+      subbing = null;
+      render();
+    }},'Wechsel durchführen'));
+  }
+
+  main.appendChild(card);
+}
+
+function logAction(match, skillCode, team, playerId, code, fromPoint, toPoint){
   const set = currentSet(match);
   const rally = set.rallies[set.rallies.length-1];
   const action = {skill:skillCode, team, playerId, code, ts:Date.now()};
   if(ZONE_SKILLS.includes(skillCode) && toPoint){
     action.toPoint = {x:Math.round(toPoint.x*10)/10, y:Math.round(toPoint.y*10)/10};
-    action.fromPoint = originFor(team, playerId, skillCode, set);
+    // Start- und Zielposition werden jetzt frei im Feld angetippt (statt automatisch aus der
+    // Rotationsposition abgeleitet), da die echte Spielerposition leicht von der App-Position abweichen kann.
+    action.fromPoint = fromPoint ? {x:Math.round(fromPoint.x*10)/10, y:Math.round(fromPoint.y*10)/10} : originFor(team, playerId, skillCode, set);
   }
   rally.actions.push(action);
   saveState();
