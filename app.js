@@ -32,8 +32,10 @@ const POSITIONS = [1,2,3,4,5,6]; // FIVB-Rotationspositionen
 const ZONE_SKILLS = ['S','A'];
 // Court-Koordinatensystem: 0–100 (Breite) x 0–130 (Länge), Netz bei y=65.
 // Position der eigenen Mannschaft (unten, eigene Grundlinie bei y=130).
+// (y bewusst mit Abstand zur Grundlinie bei y=130 gewählt, damit der Spieler-Kreis — Radius 8.5 —
+// vollständig im Feld bleibt und nicht über die Linie in die Freizone hinausragt.)
 const ORIGIN_BY_POSITION = {
-  1:{x:83,y:125}, 2:{x:83,y:80}, 3:{x:50,y:78}, 4:{x:17,y:80}, 5:{x:17,y:105}, 6:{x:50,y:108}
+  1:{x:83,y:116}, 2:{x:83,y:80}, 3:{x:50,y:78}, 4:{x:17,y:80}, 5:{x:17,y:105}, 6:{x:50,y:108}
 };
 // Position im Court-Koordinatensystem für ein Team (Gegner wird an der Netzlinie gespiegelt, damit
 // beide Mannschaften im selben Feld realistisch stehen).
@@ -56,6 +58,9 @@ let live = null;
 let tagging = null;
 // Laufender Wechsel-Dialog: {team, posIdx, newPlayerId} oder null (kein Wechsel-Dialog offen)
 let subbing = null;
+// App-Vorschau: läuft komplett im Arbeitsspeicher, wird NICHT in localStorage gespeichert und
+// überschreibt die echten Daten des Nutzers nicht (siehe startDemo/saveState/go).
+let demoMode = false;
 
 function uid(){ return Math.random().toString(36).slice(2,10)+Date.now().toString(36); }
 
@@ -67,6 +72,7 @@ function loadState(){
   return { teamName:'Eintracht Frankfurt H3', roster:[], matches:[] };
 }
 function saveState(){
+  if(demoMode) return; // Demo-Daten dürfen die echten gespeicherten Daten nie überschreiben.
   try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }catch(e){}
 }
 
@@ -208,7 +214,15 @@ function buildCourt(set, match, opts={}){
   return svg;
 }
 
-function go(r){ tagging = null; subbing = null; route = r; render(); window.scrollTo(0,0); }
+function go(r){
+  tagging = null; subbing = null;
+  if(demoMode && r.name==='home'){
+    // Demo verlassen: echte (gespeicherte) Daten wiederherstellen, sobald es zurück zur Startseite geht.
+    demoMode = false;
+    state = loadState();
+  }
+  route = r; render(); window.scrollTo(0,0);
+}
 
 function render(){
   const app = document.getElementById('app');
@@ -236,6 +250,8 @@ function renderHome(header, main){
   card.appendChild(el('div',{class:'row'},[
     el('button',{class:'btn block', onclick:()=>go({name:'newMatch'})}, '+ Neues Spiel'),
   ]));
+  card.appendChild(el('button',{class:'btn secondary block', style:'margin-top:8px;', onclick:()=>startDemo()},'🎬 App-Vorschau'));
+  card.appendChild(el('div',{style:'color:var(--muted);font-size:12px;margin-top:6px;'},'Zeigt die App sofort mit einem vorbereiteten Beispielspiel (Satz 1 & 2 bereits gespielt, 1:1) — perfekt, um sie ohne eigene Daten und ohne Zeitverlust vorzustellen. Satz 3 kannst du direkt live weiterspielen.'));
   main.appendChild(card);
 
   const listCard = el('div',{class:'card'});
@@ -430,6 +446,112 @@ function newSet(setNumber, homeLineup, awayLineup, servingTeam){
   return { setNumber, homeScore:0, awayScore:0, homeLineup:[...homeLineup], awayLineup:[...awayLineup], servingTeam, rallies:[{actions:[]}], winner:null };
 }
 
+/* ============================ App-Vorschau (Demo) ============================ */
+// Zeigt die App sofort mit einem vorbereiteten Beispielspiel (beliebige Spielernamen, Satz 1+2
+// bereits gespielt, 1:1), damit man sie ohne eigene Daten und ohne Zeitverlust vorstellen kann.
+// Läuft komplett im Arbeitsspeicher (siehe demoMode/saveState/go) — die echten gespeicherten
+// Daten des Nutzers werden dabei nie angerührt.
+
+function demoHomeRoster(){
+  return [
+    {id:'demoH1', number:1, name:'Mia',  position:'Zuspiel'},
+    {id:'demoH2', number:2, name:'Lea',  position:'Außen'},
+    {id:'demoH3', number:3, name:'Nora', position:'Mitte'},
+    {id:'demoH4', number:4, name:'Tia',  position:'Außen'},
+    {id:'demoH5', number:5, name:'Ida',  position:'Mitte'},
+    {id:'demoH6', number:6, name:'Zoe',  position:'Dia'},
+    {id:'demoH7', number:7, name:'Ella', position:'Libero'}, // bewusst auf der Bank, zum Ausprobieren von "Wechsel"
+  ];
+}
+function demoAwayRoster(){
+  return [1,2,3,4,5,6,7].map(n=>({id:'demoA'+n, number:n, name:''}));
+}
+
+function buildDemoMatch(){
+  const homePlayers = demoHomeRoster();
+  const awayPlayers = demoAwayRoster();
+  const homeLineup = homePlayers.slice(0,6).map(p=>p.id);
+  const awayLineup = awayPlayers.slice(0,6).map(p=>p.id);
+
+  // Ein paar über das Feld verteilte Zielpunkte, damit die Richtungsdiagramme in der Vorschau
+  // schon gut gefüllt aussehen (Werte sind rein illustrativ).
+  const hT = [{x:18,y:18},{x:50,y:14},{x:82,y:20},{x:28,y:38},{x:72,y:34},{x:40,y:10}];
+  const aT = [{x:18,y:112},{x:50,y:118},{x:82,y:110},{x:28,y:92},{x:72,y:96},{x:40,y:122}];
+
+  function act(skill, team, pid, code, from, to){
+    const a = {skill, team, playerId:pid, code, ts:Date.now()};
+    if(ZONE_SKILLS.includes(skill) && from && to){ a.fromPoint=from; a.toPoint=to; }
+    return a;
+  }
+  const rally = actions => ({actions});
+
+  function demoRallies(hLu, aLu, homeTargets, awayTargets){
+    return [
+      rally([ act('S','home',hLu[0],'#', positionCoord('home',1), homeTargets[0]) ]),
+      rally([
+        act('S','away',aLu[0],'+', positionCoord('away',1), awayTargets[0]),
+        act('R','home',hLu[4],'#'),
+        act('E','home',hLu[0],'#'),
+        act('A','home',hLu[1],'#', {x:17,y:80}, homeTargets[1]),
+      ]),
+      rally([
+        act('S','home',hLu[0],'!', positionCoord('home',1), homeTargets[2]),
+        act('R','away',aLu[3],'-'),
+        act('A','away',aLu[2],'=', {x:83,y:50}, awayTargets[1]),
+      ]),
+      rally([ act('S','away',aLu[0],'#', positionCoord('away',1), awayTargets[2]) ]),
+      rally([
+        act('S','home',hLu[0],'+', positionCoord('home',1), homeTargets[3]),
+        act('R','away',aLu[4],'#'),
+        act('E','away',aLu[0],'#'),
+        act('A','away',aLu[1],'+', {x:17,y:50}, awayTargets[3]),
+        act('B','home',hLu[2],'#'),
+      ]),
+      rally([
+        act('S','home',hLu[0],'-', positionCoord('home',1), homeTargets[4]),
+        act('R','away',aLu[3],'+'),
+        act('A','away',aLu[2],'#', {x:83,y:50}, awayTargets[4]),
+      ]),
+      rally([ act('S','away',aLu[0],'=', positionCoord('away',1), awayTargets[5]) ]),
+      rally([ act('S','home',hLu[0],'#', positionCoord('home',1), homeTargets[5]) ]),
+      rally([
+        act('D','away',aLu[5],'+'),
+        act('A','home',hLu[3],'#', {x:17,y:80}, homeTargets[0]),
+      ]),
+      rally([
+        act('S','away',aLu[0],'!', positionCoord('away',1), awayTargets[1]),
+        act('R','home',hLu[4],'-'),
+        act('A','home',hLu[1],'=', {x:17,y:80}, homeTargets[2]),
+      ]),
+    ];
+  }
+
+  const set1 = newSet(1, homeLineup, awayLineup, 'home');
+  set1.homeScore = 25; set1.awayScore = 20; set1.winner = 'home';
+  set1.rallies = demoRallies(homeLineup, awayLineup, hT, aT);
+
+  // Satz 2: Gegner gewinnt — Zielpunkte gespiegelt, damit es nicht wie eine reine Kopie aussieht.
+  const mirror = t => ({x:100-t.x, y:t.y});
+  const set2 = newSet(2, homeLineup, awayLineup, 'away');
+  set2.homeScore = 22; set2.awayScore = 25; set2.winner = 'away';
+  set2.rallies = demoRallies(homeLineup, awayLineup, hT.map(mirror), aT.map(mirror));
+
+  // Satz 3: frisch, 0:0 — hier kann live weitergespielt werden.
+  const set3 = newSet(3, homeLineup, awayLineup, 'home');
+
+  return {
+    id:'demo-match', date:Date.now(), opponentName:'Musterverein', bestOf:5,
+    opponentRoster: awayPlayers, status:'in_progress',
+    sets: [set1, set2, set3]
+  };
+}
+
+function startDemo(){
+  demoMode = true;
+  state = { teamName:'Eintracht Frankfurt H3 (Demo)', roster: demoHomeRoster(), matches: [ buildDemoMatch() ] };
+  go({name:'live', matchId:'demo-match'});
+}
+
 /* ============================ Live-Scouting ============================ */
 
 function renderLive(header, main){
@@ -438,7 +560,7 @@ function renderLive(header, main){
   const set = currentSet(match);
   const rally = set.rallies[set.rallies.length-1];
 
-  header.appendChild(el('button',{class:'back', onclick:()=>go({name:'home'})},'← Spiele'));
+  header.appendChild(el('button',{class:'back', onclick:()=>go({name:'home'})}, demoMode ? '✕ Demo beenden' : '← Spiele'));
   header.appendChild(el('h1',{}, state.teamName+' – '+match.opponentName));
   header.appendChild(el('button',{class:'icon-btn', onclick:()=>go({name:'stats', matchId:match.id})},'📊'));
 
@@ -725,14 +847,14 @@ function computeStats(match){
   return stats;
 }
 
-// Alle Richtungslinien eines Teams zusammen (unabhängig vom einzelnen Spieler) —
-// für das neue Team-Gesamtdiagramm (eines für uns, eines für den Gegner).
-function computeTeamDirections(match){
+// Alle Richtungslinien eines Teams zusammen (unabhängig vom einzelnen Spieler), gefiltert auf
+// EINEN Skill (S oder A) — Aufschlag- und Angriffsrichtungen sollen getrennte Diagramme sein.
+function computeTeamDirections(match, skillCode){
   const dirs = { home:{lines:[]}, away:{lines:[]} };
   match.sets.forEach(set=>{
     set.rallies.forEach(rally=>{
       rally.actions.forEach(a=>{
-        if(!ZONE_SKILLS.includes(a.skill) || !a.toPoint || !a.fromPoint) return;
+        if(a.skill!==skillCode || !a.toPoint || !a.fromPoint) return;
         dirs[a.team].lines.push({ skill:a.skill, fromPoint:a.fromPoint, toPoint:a.toPoint, code:a.code });
       });
     });
@@ -740,12 +862,13 @@ function computeTeamDirections(match){
   return dirs;
 }
 
-function computeDirections(match){
+// Wie computeTeamDirections, aber pro Spieler statt zusammengefasst — ebenfalls auf einen Skill gefiltert.
+function computeDirections(match, skillCode){
   const dirs = { home:{}, away:{} };
   match.sets.forEach(set=>{
     set.rallies.forEach(rally=>{
       rally.actions.forEach(a=>{
-        if(!ZONE_SKILLS.includes(a.skill) || !a.toPoint || !a.fromPoint) return;
+        if(a.skill!==skillCode || !a.toPoint || !a.fromPoint) return;
         const t = dirs[a.team];
         if(!t[a.playerId]) t[a.playerId] = { number: playerNumber(a.team,a.playerId,match), lines:[] };
         t[a.playerId].lines.push({ skill:a.skill, fromPoint:a.fromPoint, toPoint:a.toPoint, code:a.code });
@@ -768,42 +891,49 @@ function directionSVG(playerDirs){
   return `<svg viewBox="0 0 100 130" style="width:100%;height:auto;background:var(--bg2);border-radius:8px;display:block;">${parts.join('')}</svg>`;
 }
 
+// Überschriften je Skill für die (jetzt getrennten) Richtungsdiagramme.
+const DIRECTION_TITLES = { S:'Aufschlagrichtungen', A:'Angriffsrichtungen' };
+
 function renderDirections(main, match){
-  const dirs = computeDirections(match);
-  const teamDirs = computeTeamDirections(match);
-  ['home','away'].forEach(team=>{
-    const teamName = team==='home'?state.teamName:match.opponentName;
-    const teamLines = teamDirs[team].lines;
-    const entries = Object.entries(dirs[team]).filter(([id,d])=>d.lines.length>0);
-    if(entries.length===0 && teamLines.length===0) return;
-    const card = el('div',{class:'card printable'});
-    card.appendChild(el('h2',{}, 'Richtungen (Aufschlag/Angriff) · '+teamName));
+  // Aufschlag- und Angriffsrichtungen sind zwei getrennte Diagramm-Blöcke (je eigenes Set an Karten),
+  // nicht mehr gemeinsam in einem Diagramm gemischt.
+  ZONE_SKILLS.forEach(skillCode=>{
+    const dirs = computeDirections(match, skillCode);
+    const teamDirs = computeTeamDirections(match, skillCode);
+    ['home','away'].forEach(team=>{
+      const teamName = team==='home'?state.teamName:match.opponentName;
+      const teamLines = teamDirs[team].lines;
+      const entries = Object.entries(dirs[team]).filter(([id,d])=>d.lines.length>0);
+      if(entries.length===0 && teamLines.length===0) return;
+      const card = el('div',{class:'card printable'});
+      card.appendChild(el('h2',{}, DIRECTION_TITLES[skillCode]+' · '+teamName));
 
-    if(teamLines.length>0){
-      card.appendChild(el('div',{style:'font-size:12px;color:var(--muted);margin-bottom:4px;text-align:center;font-weight:700;'}, 'Team gesamt · '+teamName));
-      card.appendChild(el('div',{style:'max-width:220px;margin:0 auto 16px;'}, el('div',{html: directionSVG({lines:teamLines})})));
-    }
+      if(teamLines.length>0){
+        card.appendChild(el('div',{style:'font-size:12px;color:var(--muted);margin-bottom:4px;text-align:center;font-weight:700;'}, 'Team gesamt · '+teamName));
+        card.appendChild(el('div',{style:'max-width:220px;margin:0 auto 16px;'}, el('div',{html: directionSVG({lines:teamLines})})));
+      }
 
-    if(entries.length>0){
-      card.appendChild(el('div',{style:'font-size:12px;color:var(--muted);margin-bottom:6px;text-align:center;'}, 'Pro Spieler'));
-      const grid = el('div',{style:'display:grid; grid-template-columns:repeat(auto-fill,minmax(130px,1fr)); gap:12px;'});
-      entries.sort((a,b)=> (a[1].number>b[1].number?1:-1)).forEach(([pid,d])=>{
-        const box = el('div',{});
-        box.appendChild(el('div',{style:'font-size:12px;color:var(--muted);margin-bottom:4px;text-align:center;'}, '#'+d.number));
-        box.appendChild(el('div',{html: directionSVG(d)}));
-        grid.appendChild(box);
-      });
-      card.appendChild(grid);
-    }
-    card.appendChild(el('div',{style:'color:var(--muted); font-size:11px; margin-top:8px;'},'Linie = Aufschlag- bzw. Angriffsrichtung (unten = eigene Seite, oben = Gegnerfeld). Grün = Punkt/gut, Grau = weiter, Rot = Fehler.'));
-    main.appendChild(card);
+      if(entries.length>0){
+        card.appendChild(el('div',{style:'font-size:12px;color:var(--muted);margin-bottom:6px;text-align:center;'}, 'Pro Spieler'));
+        const grid = el('div',{style:'display:grid; grid-template-columns:repeat(auto-fill,minmax(130px,1fr)); gap:12px;'});
+        entries.sort((a,b)=> (a[1].number>b[1].number?1:-1)).forEach(([pid,d])=>{
+          const box = el('div',{});
+          box.appendChild(el('div',{style:'font-size:12px;color:var(--muted);margin-bottom:4px;text-align:center;'}, '#'+d.number));
+          box.appendChild(el('div',{html: directionSVG(d)}));
+          grid.appendChild(box);
+        });
+        card.appendChild(grid);
+      }
+      card.appendChild(el('div',{style:'color:var(--muted); font-size:11px; margin-top:8px;'},'Linie = '+(skillCode==='S'?'Aufschlag':'Angriff')+'richtung (unten = eigene Seite, oben = Gegnerfeld). Grün = Punkt/gut, Grau = weiter, Rot = Fehler.'));
+      main.appendChild(card);
+    });
   });
 }
 
 function renderStats(header, main){
   const match = getMatch(route.matchId);
   if(!match){ go({name:'home'}); return; }
-  header.appendChild(el('button',{class:'back', onclick:()=>go({name:'home'})},'← Spiele'));
+  header.appendChild(el('button',{class:'back', onclick:()=>go({name:'home'})}, demoMode ? '✕ Demo beenden' : '← Spiele'));
   header.appendChild(el('h1',{},'Statistik'));
   if(match.status!=='finished'){
     header.appendChild(el('button',{class:'icon-btn', onclick:()=>go({name:'live', matchId:match.id})},'🏐'));
