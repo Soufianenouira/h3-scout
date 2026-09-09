@@ -14,8 +14,12 @@ const SKILLS = [
   {code:'E', label:'Zuspiel', short:'Set'},
 ];
 const SKILL_MAP = Object.fromEntries(SKILLS.map(s=>[s.code,s]));
+// "Gegner-Fehler" ist kein eigener Skill in SKILLS (taucht daher nicht in der ausführlichen
+// "+"-Erfassung auf), braucht aber trotzdem einen Anzeigenamen für Rally-Liste/CSV/Statistik.
+SKILL_MAP.OE = {code:'OE', label:'Gegner-Fehler', short:'OpponentError'};
 
-// Bewertungsskala (vereinfacht, angelehnt an Data Volley / Click&Scout)
+// Bewertungsskala (vereinfacht, angelehnt an Data Volley / Click&Scout) — nur noch für die
+// ausführliche "+"-Erfassung relevant, die 4 Schnell-Buttons unten brauchen sie nicht mehr.
 const EVALS = [
   {code:'#', label:'Perfekt',  cls:'ev-perfect'},
   {code:'+', label:'Gut',      cls:'ev-good'},
@@ -25,6 +29,13 @@ const EVALS = [
 ];
 // Codes, bei denen eine '#' direkt einen Punkt für das agierende Team bedeutet
 const POINT_ON_PERFECT = ['S','A','B'];
+
+// Schnellerfassung: Angriff/Block/Aufschlag/Gegner-Fehler sind IMMER ein Punkt — statt einer
+// Bewertung (perfekt/gut/...) wird nur noch die Art der Aktion gewählt.
+const ATTACK_TYPES = ['harter Angriffsschlag','platzierter Angriff','Lob / Heber','Angriff in die Lücke','Angriff über den Block','Rollshot','Hinterfeldangriff'];
+const BLOCK_TYPES = ['direkter Blockpunkt','Blockberührung (Ball nicht mehr spielbar)','Block gegen Schnellangriff','Block gegen Außen/Diagonal','Block-Abpraller ins gegnerische Feld'];
+const SERVE_TYPES = ['Ass (direkt ins Feld)','Annahmefehler (Ball ins Aus)','erzwungener unkontrollierter Ballwechsel'];
+const OPP_ERROR_TYPES = ['Aufschlag ins Aus','Angriff ins Aus','Angriff ins Netz','Netzberührung','Übertreten der Mittellinie','Vier Ballkontakte','Falsche Rotation','Ball gehalten/geführt','Doppelberührung'];
 
 const POSITIONS = [1,2,3,4,5,6]; // FIVB-Rotationspositionen
 
@@ -202,7 +213,7 @@ function buildCourt(set, match, opts={}){
       const c = positionCoord(team,pos);
       const isServer = set.servingTeam===team && pos===1;
       const selectable = opts.selectableTeam==='both' || opts.selectableTeam===team;
-      const isSelected = pid===opts.selectedPlayerId;
+      const isSelected = Array.isArray(opts.selectedPlayerId) ? opts.selectedPlayerId.includes(pid) : pid===opts.selectedPlayerId;
       const g = svgEl('g', selectable ? {style:'cursor:pointer', onclick:()=>opts.onSelectPlayer(team,pid)} : {});
       g.appendChild(svgEl('circle',{cx:c.x,cy:c.y,r:8.5, fill:teamColor, stroke: isSelected?'#facc15':'#0f172a', 'stroke-width': isSelected?2.2:1, opacity: selectable?1:0.5}));
       const text = svgEl('text',{x:c.x,y:c.y+2.8,'text-anchor':'middle','font-size':7,fill:'#fff','font-weight':700});
@@ -616,9 +627,15 @@ function renderLive(header, main){
   rallyCard.appendChild(el('h2',{},'Aktuelle Rally'));
   if(rally.actions.length===0) rallyCard.appendChild(el('div',{class:'empty'},'Noch keine Aktion in dieser Rally.'));
   rally.actions.forEach(a=>{
+    const ids = a.playerIds || (a.playerId ? [a.playerId] : []);
+    const names = ids.map(pid=>playerName(a.team,pid,match)).join(', ');
+    const skillLabel = (SKILL_MAP[a.skill]||{label:a.skill}).label;
     rallyCard.appendChild(el('div',{class:'list-item'},[
-      el('div',{},[ el('strong',{}, SKILL_MAP[a.skill].label+' '), playerName(a.team,a.playerId,match), el('span',{class:'pill',style:'margin-left:8px'}, a.team==='home'?state.teamName:match.opponentName) ]),
-      el('div',{style:'font-weight:800'}, a.code)
+      el('div',{},[ el('strong',{}, skillLabel+' '), names||null, el('span',{class:'pill',style:'margin-left:8px'}, a.team==='home'?state.teamName:match.opponentName) ]),
+      el('div',{style:'text-align:right'},[
+        el('div',{style:'font-weight:800'}, a.code),
+        a.type ? el('div',{style:'font-size:11px;color:var(--muted);max-width:170px;'}, a.type) : null
+      ])
     ]));
   });
   main.appendChild(rallyCard);
@@ -647,60 +664,212 @@ function fieldSection(main, match, set){
   fieldCard.appendChild(el('h2',{}, 'Spielfeld  ·  Blau: '+state.teamName+'  ·  Rot: '+match.opponentName));
 
   if(!tagging){
-    fieldCard.appendChild(el('div',{style:'color:var(--muted);font-size:12px;margin-bottom:8px;'}, 'Aktion wählen, dann direkt hier im Feld auf Spieler (und ggf. Zielort) tippen.'));
+    // Ruhezustand: nur die 4 Schnell-Buttons + "+". Ein Klick auf Angriff/Block/Aufschlag/
+    // Gegner-Fehler IST bereits ein Punkt — keine Bewertungsskala mehr nötig, stattdessen wird
+    // danach nur noch die Art der Aktion gewählt.
+    fieldCard.appendChild(el('div',{style:'color:var(--muted);font-size:12px;margin-bottom:8px;'}, 'Ein Klick (außer +) ist direkt ein Punkt für das jeweilige Team.'));
     fieldCard.appendChild(buildCourt(set, match, {}));
-    const skillGrid = el('div',{class:'row', style:'margin-top:10px;'});
-    SKILLS.forEach(sk=>{
-      skillGrid.appendChild(el('button',{class:'btn secondary', style:'flex:1 1 30%;', onclick:()=>{ tagging = {skillCode:sk.code, team:null, playerId:'', fromPoint:null, toPoint:null}; render(); }}, sk.label));
-    });
-    fieldCard.appendChild(skillGrid);
+    const grid = el('div',{class:'row', style:'margin-top:10px;'});
+    grid.appendChild(el('button',{class:'btn secondary', style:'flex:1 1 45%;', onclick:()=>{ tagging = {quick:'A', team:null, playerId:'', fromPoint:null, toPoint:null}; render(); }}, 'Angriff'));
+    grid.appendChild(el('button',{class:'btn secondary', style:'flex:1 1 45%;', onclick:()=>{ tagging = {quick:'B', team:null, playerIds:[]}; render(); }}, 'Block'));
+    grid.appendChild(el('button',{class:'btn secondary', style:'flex:1 1 45%;', onclick:()=>{ tagging = {quick:'S', team:null, playerId:'', fromPoint:null, toPoint:null}; render(); }}, 'Aufschlag'));
+    grid.appendChild(el('button',{class:'btn secondary', style:'flex:1 1 45%;', onclick:()=>{ tagging = {quick:'OE', team:null}; render(); }}, 'Gegner-Fehler'));
+    fieldCard.appendChild(grid);
+    fieldCard.appendChild(el('button',{class:'btn ghost block', style:'margin-top:8px;', onclick:()=>{ tagging = {legacy:true, skillCode:null, team:null, playerId:'', fromPoint:null, toPoint:null}; render(); }}, '+ weitere Aktion (ausführlich, mit Bewertung)'));
+  } else if(tagging.legacy){
+    fieldLegacySection(fieldCard, match, set);
+  } else if(tagging.quick==='OE'){
+    fieldQuickOpponentErrorSection(fieldCard, match);
+  } else if(tagging.quick==='B'){
+    fieldQuickBlockSection(fieldCard, match, set);
   } else {
-    const skill = SKILL_MAP[tagging.skillCode];
-    const needsTarget = ZONE_SKILLS.includes(tagging.skillCode);
-    // Bei Aufschlag/Annahme ist das Team durch die Spielsituation vorgegeben (nur diese Seite antippbar).
-    const fixedTeam = tagging.skillCode==='S' ? set.servingTeam : (tagging.skillCode==='R' ? (set.servingTeam==='home'?'away':'home') : null);
-    const canEval = tagging.playerId && (!needsTarget || (tagging.fromPoint && tagging.toPoint));
-
-    let hintText;
-    if(!tagging.playerId) hintText = 'Auf den Spieler im Feld tippen, der die Aktion ausgeführt hat.';
-    else if(needsTarget && !tagging.fromPoint) hintText = 'Jetzt auf die Startposition tippen (wo der Ball gespielt wurde — auch in der Freizone möglich, z.B. Aufschlagzone).';
-    else if(needsTarget && !tagging.toPoint) hintText = 'Jetzt auf die Zielposition tippen (wohin gespielt wurde).';
-    else hintText = 'Bewertung wählen.';
-    fieldCard.appendChild(el('div',{style:'color:var(--accent);font-weight:600;font-size:13px;margin-bottom:8px;'}, skill.label+' erfassen: '+hintText));
-
-    fieldCard.appendChild(buildCourt(set, match, {
-      selectableTeam: fixedTeam || 'both',
-      onSelectPlayer: (team,pid)=>{ tagging.team=team; tagging.playerId=pid; tagging.fromPoint=null; tagging.toPoint=null; render(); },
-      selectedPlayerId: tagging.playerId,
-      onTapTarget: (needsTarget && tagging.playerId && !canEval) ? (x,y)=>{
-        if(!tagging.fromPoint) tagging.fromPoint={x,y}; else tagging.toPoint={x,y};
-        render();
-      } : null,
-      previewFrom: needsTarget ? tagging.fromPoint : null,
-      previewTo: needsTarget ? tagging.toPoint : null,
-      previewColor: '#facc15'
-    }));
-
-    if(needsTarget && tagging.playerId && (tagging.fromPoint || tagging.toPoint)){
-      fieldCard.appendChild(el('button',{class:'btn ghost block', style:'margin-top:6px;font-size:12px;', onclick:()=>{ tagging.fromPoint=null; tagging.toPoint=null; render(); }},'↺ Start-/Zielposition neu setzen'));
-    }
-
-    const evalRow = el('div',{class:'row eval-row', style:'margin-top:10px;'});
-    EVALS.forEach(ev=>{
-      evalRow.appendChild(el('button',{class:'btn secondary '+ev.cls, style:'flex:1 1 18%;', onclick:()=>{
-        if(!tagging.playerId){ alert('Bitte zuerst im Feld auf einen Spieler tippen.'); return; }
-        if(needsTarget && (!tagging.fromPoint || !tagging.toPoint)){ alert('Bitte Start- und Zielposition im Feld antippen.'); return; }
-        const t = tagging;
-        tagging = null;
-        logAction(match, t.skillCode, t.team, t.playerId, ev.code, t.fromPoint, t.toPoint);
-      }}, ev.code+' '+ev.label));
-    });
-    fieldCard.appendChild(el('label',{},'Bewertung'));
-    fieldCard.appendChild(evalRow);
-    fieldCard.appendChild(el('button',{class:'btn ghost block', style:'margin-top:10px', onclick:()=>{ tagging=null; render(); }},'Abbrechen'));
+    fieldQuickAttackServeSection(fieldCard, match, set);
   }
 
   main.appendChild(fieldCard);
+}
+
+// Ausführliche Erfassung (der bisherige, vollständige Ablauf: alle 6 Skills + 5-stufige
+// Bewertungsskala). Erreichbar über den "+"-Button, für alles was nicht in die 4 Schnell-Buttons
+// passt (z.B. Annahme/Abwehr/Zuspiel einzeln festhalten, oder eine differenziertere Bewertung).
+function fieldLegacySection(fieldCard, match, set){
+  if(!tagging.skillCode){
+    fieldCard.appendChild(el('div',{style:'color:var(--muted);font-size:12px;margin-bottom:8px;'}, 'Weitere Aktion — ausführliche Erfassung mit Bewertung (perfekt/gut/neutral/schwach/Fehler).'));
+    fieldCard.appendChild(buildCourt(set, match, {}));
+    const skillGrid = el('div',{class:'row', style:'margin-top:10px;'});
+    SKILLS.forEach(sk=>{
+      skillGrid.appendChild(el('button',{class:'btn secondary', style:'flex:1 1 30%;', onclick:()=>{ tagging.skillCode = sk.code; render(); }}, sk.label));
+    });
+    fieldCard.appendChild(skillGrid);
+    fieldCard.appendChild(el('button',{class:'btn ghost block', style:'margin-top:10px', onclick:()=>{ tagging=null; render(); }},'Abbrechen'));
+    return;
+  }
+
+  const skill = SKILL_MAP[tagging.skillCode];
+  const needsTarget = ZONE_SKILLS.includes(tagging.skillCode);
+  // Bei Aufschlag/Annahme ist das Team durch die Spielsituation vorgegeben (nur diese Seite antippbar).
+  const fixedTeam = tagging.skillCode==='S' ? set.servingTeam : (tagging.skillCode==='R' ? (set.servingTeam==='home'?'away':'home') : null);
+  const canEval = tagging.playerId && (!needsTarget || (tagging.fromPoint && tagging.toPoint));
+
+  let hintText;
+  if(!tagging.playerId) hintText = 'Auf den Spieler im Feld tippen, der die Aktion ausgeführt hat.';
+  else if(needsTarget && !tagging.fromPoint) hintText = 'Jetzt auf die Startposition tippen (wo der Ball gespielt wurde — auch in der Freizone möglich, z.B. Aufschlagzone).';
+  else if(needsTarget && !tagging.toPoint) hintText = 'Jetzt auf die Zielposition tippen (wohin gespielt wurde).';
+  else hintText = 'Bewertung wählen.';
+  fieldCard.appendChild(el('div',{style:'color:var(--accent);font-weight:600;font-size:13px;margin-bottom:8px;'}, skill.label+' erfassen: '+hintText));
+
+  fieldCard.appendChild(buildCourt(set, match, {
+    selectableTeam: fixedTeam || 'both',
+    onSelectPlayer: (team,pid)=>{ tagging.team=team; tagging.playerId=pid; tagging.fromPoint=null; tagging.toPoint=null; render(); },
+    selectedPlayerId: tagging.playerId,
+    onTapTarget: (needsTarget && tagging.playerId && !canEval) ? (x,y)=>{
+      if(!tagging.fromPoint) tagging.fromPoint={x,y}; else tagging.toPoint={x,y};
+      render();
+    } : null,
+    previewFrom: needsTarget ? tagging.fromPoint : null,
+    previewTo: needsTarget ? tagging.toPoint : null,
+    previewColor: '#facc15'
+  }));
+
+  if(needsTarget && tagging.playerId && (tagging.fromPoint || tagging.toPoint)){
+    fieldCard.appendChild(el('button',{class:'btn ghost block', style:'margin-top:6px;font-size:12px;', onclick:()=>{ tagging.fromPoint=null; tagging.toPoint=null; render(); }},'↺ Start-/Zielposition neu setzen'));
+  }
+
+  const evalRow = el('div',{class:'row eval-row', style:'margin-top:10px;'});
+  EVALS.forEach(ev=>{
+    evalRow.appendChild(el('button',{class:'btn secondary '+ev.cls, style:'flex:1 1 18%;', onclick:()=>{
+      if(!tagging.playerId){ alert('Bitte zuerst im Feld auf einen Spieler tippen.'); return; }
+      if(needsTarget && (!tagging.fromPoint || !tagging.toPoint)){ alert('Bitte Start- und Zielposition im Feld antippen.'); return; }
+      const t = tagging;
+      tagging = null;
+      logAction(match, t.skillCode, t.team, t.playerId, ev.code, t.fromPoint, t.toPoint);
+    }}, ev.code+' '+ev.label));
+  });
+  fieldCard.appendChild(el('label',{},'Bewertung'));
+  fieldCard.appendChild(evalRow);
+  fieldCard.appendChild(el('button',{class:'btn ghost block', style:'margin-top:10px', onclick:()=>{ tagging=null; render(); }},'Abbrechen'));
+}
+
+// Schnellerfassung Angriff/Aufschlag: Spieler + Start-/Zielposition (für die Richtungsdiagramme)
+// antippen, danach direkt die Art wählen — das IST der Punkt, keine separate Bewertung nötig.
+function fieldQuickAttackServeSection(fieldCard, match, set){
+  const isServe = tagging.quick==='S';
+  const label = isServe ? 'Aufschlag' : 'Angriff';
+  const types = isServe ? SERVE_TYPES : ATTACK_TYPES;
+  const fixedTeam = isServe ? set.servingTeam : null; // Aufschlag: nur das aufschlagende Team kann antippbar sein
+  const canPickType = tagging.playerId && tagging.fromPoint && tagging.toPoint;
+
+  let hintText;
+  if(!tagging.playerId) hintText = 'Auf den Spieler im Feld tippen, der '+(isServe?'aufgeschlagen':'angegriffen')+' hat.';
+  else if(!tagging.fromPoint) hintText = 'Startposition antippen (auch in der Freizone möglich).';
+  else if(!tagging.toPoint) hintText = 'Zielposition antippen.';
+  else hintText = 'Art wählen — das ist direkt der Punkt.';
+  fieldCard.appendChild(el('div',{style:'color:var(--accent);font-weight:600;font-size:13px;margin-bottom:8px;'}, label+' erfassen: '+hintText));
+
+  fieldCard.appendChild(buildCourt(set, match, {
+    selectableTeam: fixedTeam || 'both',
+    onSelectPlayer: (team,pid)=>{ tagging.team=team; tagging.playerId=pid; tagging.fromPoint=null; tagging.toPoint=null; render(); },
+    selectedPlayerId: tagging.playerId,
+    onTapTarget: (tagging.playerId && !canPickType) ? (x,y)=>{
+      if(!tagging.fromPoint) tagging.fromPoint={x,y}; else tagging.toPoint={x,y};
+      render();
+    } : null,
+    previewFrom: tagging.fromPoint,
+    previewTo: tagging.toPoint,
+    previewColor: '#facc15'
+  }));
+
+  if(tagging.playerId && (tagging.fromPoint || tagging.toPoint)){
+    fieldCard.appendChild(el('button',{class:'btn ghost block', style:'margin-top:6px;font-size:12px;', onclick:()=>{ tagging.fromPoint=null; tagging.toPoint=null; render(); }},'↺ Start-/Zielposition neu setzen'));
+  }
+
+  if(canPickType){
+    fieldCard.appendChild(el('label',{style:'margin-top:8px;'},'Art des '+label+'s'));
+    const grid = el('div',{class:'row'});
+    types.forEach(type=>{
+      grid.appendChild(el('button',{class:'btn secondary', style:'flex:1 1 45%;', onclick:()=>{
+        const t = tagging;
+        tagging = null;
+        logQuickPoint(match, {skillCode:t.quick, team:t.team, playerId:t.playerId, type, fromPoint:t.fromPoint, toPoint:t.toPoint});
+      }}, type));
+    });
+    fieldCard.appendChild(grid);
+  }
+  fieldCard.appendChild(el('button',{class:'btn ghost block', style:'margin-top:10px', onclick:()=>{ tagging=null; render(); }},'Abbrechen'));
+}
+
+// Schnellerfassung Block: bis zu 3 Spieler:innen DESSELBEN Teams antippen (Mehrfachblock),
+// danach die Art wählen — das ist direkt der Punkt für das blockende Team.
+function fieldQuickBlockSection(fieldCard, match, set){
+  const hintText = tagging.playerIds.length===0
+    ? 'Bis zu 3 Spieler:innen des blockenden Teams antippen.'
+    : ('Ausgewählt: '+tagging.playerIds.length+'/3 — weitere antippen (gleiches Team) oder Art wählen.');
+  fieldCard.appendChild(el('div',{style:'color:var(--accent);font-weight:600;font-size:13px;margin-bottom:8px;'}, 'Block erfassen: '+hintText));
+
+  fieldCard.appendChild(buildCourt(set, match, {
+    selectableTeam: tagging.team || 'both',
+    onSelectPlayer: (team,pid)=>{
+      if(tagging.team && team!==tagging.team){ alert('Bitte nur Spieler:innen von einem Team auswählen.'); return; }
+      const idx = tagging.playerIds.indexOf(pid);
+      if(idx>=0){
+        tagging.playerIds.splice(idx,1);
+        if(tagging.playerIds.length===0) tagging.team=null;
+      } else {
+        if(tagging.playerIds.length>=3){ alert('Maximal 3 Spieler:innen pro Block.'); return; }
+        tagging.team = team;
+        tagging.playerIds.push(pid);
+      }
+      render();
+    },
+    selectedPlayerId: tagging.playerIds,
+  }));
+
+  if(tagging.playerIds.length>0){
+    const chips = el('div',{class:'row', style:'margin-top:6px;'});
+    tagging.playerIds.forEach(pid=>{
+      chips.appendChild(el('span',{class:'pill'}, playerName(tagging.team,pid,match)));
+    });
+    fieldCard.appendChild(chips);
+  }
+
+  if(tagging.playerIds.length>0){
+    fieldCard.appendChild(el('label',{style:'margin-top:8px;'},'Art des Blocks'));
+    const grid = el('div',{class:'row'});
+    BLOCK_TYPES.forEach(type=>{
+      grid.appendChild(el('button',{class:'btn secondary', style:'flex:1 1 45%;', onclick:()=>{
+        const t = tagging;
+        tagging = null;
+        logQuickPoint(match, {skillCode:'B', team:t.team, playerIds:t.playerIds, type});
+      }}, type));
+    });
+    fieldCard.appendChild(grid);
+  }
+  fieldCard.appendChild(el('button',{class:'btn ghost block', style:'margin-top:10px', onclick:()=>{ tagging=null; render(); }},'Abbrechen'));
+}
+
+// Schnellerfassung Gegner-Fehler: kein Spieler nötig — nur welches Team den Punkt bekommt,
+// dann welche Art Fehler es beim Gegner war.
+function fieldQuickOpponentErrorSection(fieldCard, match){
+  fieldCard.appendChild(el('div',{style:'color:var(--accent);font-weight:600;font-size:13px;margin-bottom:8px;'}, 'Gegner-Fehler erfassen'));
+  if(!tagging.team){
+    fieldCard.appendChild(el('div',{style:'color:var(--muted);font-size:12px;margin-bottom:8px;'}, 'Welches Team bekommt den Punkt?'));
+    const row = el('div',{class:'row'});
+    row.appendChild(el('button',{class:'btn secondary', style:'flex:1', onclick:()=>{ tagging.team='home'; render(); }}, state.teamName));
+    row.appendChild(el('button',{class:'btn secondary', style:'flex:1', onclick:()=>{ tagging.team='away'; render(); }}, match.opponentName));
+    fieldCard.appendChild(row);
+  } else {
+    fieldCard.appendChild(el('div',{style:'color:var(--muted);font-size:12px;margin-bottom:8px;'}, 'Fehlerart des Gegners wählen:'));
+    const grid = el('div',{class:'row'});
+    OPP_ERROR_TYPES.forEach(type=>{
+      grid.appendChild(el('button',{class:'btn secondary', style:'flex:1 1 45%;', onclick:()=>{
+        const t = tagging;
+        tagging = null;
+        logQuickPoint(match, {skillCode:'OE', team:t.team, type});
+      }}, type));
+    });
+    fieldCard.appendChild(grid);
+  }
+  fieldCard.appendChild(el('button',{class:'btn ghost block', style:'margin-top:10px', onclick:()=>{ tagging=null; render(); }},'Abbrechen'));
 }
 
 // Wechsel: Spieler:in auf einer Feldposition gegen jemanden von der Bank tauschen. Der/die
@@ -810,6 +979,26 @@ function undoLastPoint(match){
   commenting = null;
   saveState();
   go({name:'live', matchId:match.id}); // auch von der Statistik-Seite aus zurück zur Live-Ansicht
+}
+
+// Schnellerfassung (Angriff/Block/Aufschlag/Gegner-Fehler): jede dieser Aktionen IST bereits der
+// Punkt, daher direkt loggen und die Rally schließen — keine Bewertungsskala, stattdessen die Art
+// der Aktion (opts.type) als Freitext-Tag. playerIds (Array) für Block (bis zu 3 Spieler:innen),
+// playerId (einzeln) für Angriff/Aufschlag, keins von beidem für Gegner-Fehler.
+function logQuickPoint(match, opts){
+  const set = currentSet(match);
+  const rally = set.rallies[set.rallies.length-1];
+  const action = { skill: opts.skillCode, team: opts.team, code:'#', type: opts.type, ts: Date.now() };
+  if(opts.playerIds && opts.playerIds.length) action.playerIds = opts.playerIds.slice();
+  else if(opts.playerId) action.playerId = opts.playerId;
+  if(opts.fromPoint && opts.toPoint){
+    action.fromPoint = {x:Math.round(opts.fromPoint.x*10)/10, y:Math.round(opts.fromPoint.y*10)/10};
+    action.toPoint = {x:Math.round(opts.toPoint.x*10)/10, y:Math.round(opts.toPoint.y*10)/10};
+  }
+  rally.actions.push(action);
+  lastPointRally = { matchId: match.id, rally, winningTeam: opts.team };
+  commenting = null;
+  closeRally(match, opts.team);
 }
 
 function closeRally(match, pointTo){
@@ -1003,9 +1192,13 @@ function computeStats(match){
   match.sets.forEach(set=>{
     set.rallies.forEach(rally=>{
       rally.actions.forEach(a=>{
+        // Block (Schnellerfassung) kann mehrere Spieler:innen haben (a.playerIds); alle anderen
+        // Aktionen genau eine:n (a.playerId); Gegner-Fehler hat gar keine:n (ids bleibt leer).
+        const ids = a.playerIds || (a.playerId ? [a.playerId] : []);
+        ids.forEach(pid=>{
         const t = stats[a.team];
-        if(!t[a.playerId]) t[a.playerId] = { number: playerNumber(a.team,a.playerId,match), name:'', bySkill:{} };
-        const p = t[a.playerId];
+        if(!t[pid]) t[pid] = { number: playerNumber(a.team,pid,match), name:'', bySkill:{} };
+        const p = t[pid];
         if(!p.bySkill[a.skill]) p.bySkill[a.skill] = {total:0, perfect:0, good:0, neutral:0, poor:0, error:0};
         const s = p.bySkill[a.skill];
         s.total++;
@@ -1014,6 +1207,7 @@ function computeStats(match){
         else if(a.code==='!') s.neutral++;
         else if(a.code==='-') s.poor++;
         else if(a.code==='=') s.error++;
+        });
       });
     });
   });
@@ -1165,19 +1359,22 @@ function thStyle(){ return 'text-align:center;padding:6px 4px;border-bottom:1px 
 function tdStyle(){ return 'text-align:center;padding:6px 4px;border-bottom:1px solid var(--line);'; }
 
 function exportCSV(match){
-  let rows = [['Satz','Rally','Team','Skill','Spieler','Bewertung','Von(x,y)','Ziel(x,y)','Kommentar']];
+  let rows = [['Satz','Rally','Team','Skill','Art','Spieler','Bewertung','Von(x,y)','Ziel(x,y)','Kommentar']];
   match.sets.forEach(set=>{
     set.rallies.forEach((rally,ri)=>{
       rally.actions.forEach(a=>{
         const from = a.fromPoint ? (a.fromPoint.x+','+a.fromPoint.y) : '';
         const to = a.toPoint ? (a.toPoint.x+','+a.toPoint.y) : '';
-        rows.push([set.setNumber, ri+1, a.team==='home'?state.teamName:match.opponentName, SKILL_MAP[a.skill].label, playerName(a.team,a.playerId,match), a.code, from, to, '']);
+        const ids = a.playerIds || (a.playerId ? [a.playerId] : []);
+        const names = ids.map(pid=>playerName(a.team,pid,match)).join(', ');
+        const skillLabel = (SKILL_MAP[a.skill]||{label:a.skill}).label;
+        rows.push([set.setNumber, ri+1, a.team==='home'?state.teamName:match.opponentName, skillLabel, a.type||'', names, a.code, from, to, '']);
       });
       // Diktierter/getippter Fehler-Kommentar zum Team, das diesen Punkt verloren hat.
       if(rally.comment){
         const cTeamName = rally.comment.team==='home' ? state.teamName : match.opponentName;
         const names = (rally.comment.playerIds||[]).map(pid=>playerName(rally.comment.team, pid, match)).join(', ');
-        rows.push([set.setNumber, ri+1, cTeamName, 'Fehler-Notiz', names, '', '', '', rally.comment.text]);
+        rows.push([set.setNumber, ri+1, cTeamName, 'Fehler-Notiz', '', names, '', '', '', rally.comment.text]);
       }
     });
   });
