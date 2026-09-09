@@ -26,18 +26,6 @@ const EVALS = [
 // Codes, bei denen eine '#' direkt einen Punkt für das agierende Team bedeutet
 const POINT_ON_PERFECT = ['S','A','B'];
 
-// Vereinfachter Punkte-Modus (z.B. für Co-Trainer:innen, die nicht beide Teams im Detail
-// tracken können): statt Aktion für Aktion zu erfassen, wird nur der Punkt selbst mit einem
-// kurzen Grund erfasst — jeder Punkt des einen Teams ist automatisch ein Fehler/Gegenpunkt-
-// Ursache des anderen. Es gibt nur wenige Möglichkeiten, wie ein Ballwechsel endet.
-const POINT_REASONS = [
-  {code:'ace',      label:'Ass'},
-  {code:'attack',   label:'Angriff'},
-  {code:'block',    label:'Block'},
-  {code:'oppError', label:'Gegner-Fehler'},
-];
-const POINT_REASON_MAP = Object.fromEntries(POINT_REASONS.map(r=>[r.code,r]));
-
 const POSITIONS = [1,2,3,4,5,6]; // FIVB-Rotationspositionen
 
 // Richtungserfassung (wer schlägt wohin) — nur für Aufschlag und Angriff
@@ -73,10 +61,10 @@ let subbing = null;
 // App-Vorschau: läuft komplett im Arbeitsspeicher, wird NICHT in localStorage gespeichert und
 // überschreibt die echten Daten des Nutzers nicht (siehe startDemo/saveState/go).
 let demoMode = false;
-// Zuletzt per Schnell-Punkte-Modus abgeschlossene Rally, für den optionalen Kommentar danach:
-// {matchId, rally} oder null (kein offener "letzter Punkt" mehr zu kommentieren).
+// Zuletzt abgeschlossene Rally (egal ob per Feld-Tagging oder manuellem Punkt-Button), für die
+// optionale Fehler-Erfassung danach: {matchId, rally, winningTeam} oder null (nichts mehr offen).
 let lastPointRally = null;
-// Laufendes Kommentar-Formular zum letzten Punkt: {playerId, text} oder null (Formular geschlossen)
+// Laufendes Fehler-Formular: {playerIds:[...], text} oder null (Formular geschlossen)
 let commenting = null;
 
 function uid(){ return Math.random().toString(36).slice(2,10)+Date.now().toString(36); }
@@ -596,22 +584,24 @@ function renderLive(header, main){
       el('div',{style:'font-size:40px;font-weight:800;color:var(--away)'}, String(set.awayScore))
     ]),
   ]));
+  board.appendChild(el('div',{style:'display:flex;gap:10px;margin-top:10px;'},[
+    el('button',{class:'btn secondary', style:'flex:1', onclick:()=>manualPoint(match,'home')},'Punkt '+state.teamName),
+    el('button',{class:'btn secondary', style:'flex:1', onclick:()=>manualPoint(match,'away')},'Punkt '+match.opponentName),
+  ]));
   board.appendChild(el('button',{class:'btn ghost block', style:'margin-top:8px', onclick:()=>undoLastAction(match)},'↩ Letzte Aktion rückgängig'));
   main.appendChild(board);
-
-  // Schnell-Punkte-Modus: für Co-Trainer:innen, die nicht beide Teams im Detail tracken können —
-  // nur den Punkt mit kurzem Grund erfassen, plus optional ein diktierter Kommentar danach.
-  quickPointSection(main, match, set);
 
   // Wechsel: eine Spielerin/ein Spieler auf einer Position gegen jemanden von der Bank tauschen.
   substitutionSection(main, match, set);
 
   // Spielfeld: zeigt die Aufstellung UND dient direkt zum Erfassen einer Aktion —
-  // kein separates/extra Feld mehr, alles läuft in dieser einen Karte (für volles Scouting).
+  // kein separates/extra Feld mehr, alles läuft in dieser einen Karte.
   fieldSection(main, match, set);
 
-  // Punkte-Verlauf (Schnell-Modus): zeigt erfasste Punkte mit Grund + Kommentar.
-  pointsLogSection(main, match);
+  // Fehler-Erfassung: erscheint erst NACHDEM ein Punkt (egal ob per Feld-Tagging oder manuell)
+  // erfasst wurde — dann optional Spieler(innen) des Teams, das den Punkt verloren hat, plus
+  // getippter/diktierter Kommentar. Verschwindet wieder, sobald gesendet oder der nächste Punkt fällt.
+  commentSection(main, match);
 
   // Aktionen dieser Rally
   const rallyCard = el('div',{class:'card'});
@@ -624,6 +614,9 @@ function renderLive(header, main){
     ]));
   });
   main.appendChild(rallyCard);
+
+  // Fehler-Notizen (Verlauf der gesendeten Kommentare aus der Fehler-Erfassung oben).
+  errorNotesSection(main, match);
 
   // Statistik & Diagramme sind während des ganzen Spiels/Satzes durchgehend sichtbar,
   // nicht nur über die separate Statistik-Seite.
@@ -772,8 +765,14 @@ function logAction(match, skillCode, team, playerId, code, fromPoint, toPoint){
   saveState();
 
   if(code==='='){
-    closeRally(match, team==='home'?'away':'home');
+    // Die Aktion selbst war der Fehler des agierenden Teams -> Punkt geht ans andere Team.
+    const winningTeam = team==='home'?'away':'home';
+    lastPointRally = { matchId: match.id, rally, winningTeam };
+    commenting = null;
+    closeRally(match, winningTeam);
   } else if(code==='#' && POINT_ON_PERFECT.includes(skillCode)){
+    lastPointRally = { matchId: match.id, rally, winningTeam: team };
+    commenting = null;
     closeRally(match, team);
   } else {
     render();
@@ -821,75 +820,47 @@ function closeRally(match, pointTo){
 }
 
 function manualPoint(match, team){
+  const set = currentSet(match);
+  const rally = set.rallies[set.rallies.length-1];
+  lastPointRally = { matchId: match.id, rally, winningTeam: team };
+  commenting = null;
   closeRally(match, team);
 }
 
-// Schnell-Punkte-Modus: eine Spielerin/ein Spieler-lose Kurzerfassung — nur Team + Grund, kein
-// Aufschlag/Annahme/Zielort-Tagging. Jeder Punkt des einen Teams gilt automatisch als Fehler-
-// Ursache beim anderen (der Grund-Button beschreibt schon, wie der Ballwechsel endete).
-function logQuickPoint(match, team, reasonCode){
-  const set = currentSet(match);
-  const rally = set.rallies[set.rallies.length-1];
-  rally.pointReason = { team, reason: reasonCode };
-  lastPointRally = { matchId: match.id, rally };
-  commenting = null;
-  closeRally(match, team); // score, Rotation, Satz-/Spielende — wie bei jedem anderen Punkt
-}
-
-function quickPointSection(main, match, set){
-  const card = el('div',{class:'card'});
-  card.appendChild(el('h2',{},'Punkt erfassen'));
-  card.appendChild(el('div',{style:'color:var(--muted);font-size:12px;margin-bottom:10px;'},'Grund antippen — Punkt, Rotation und Aufschlagwechsel laufen automatisch mit. Praktisch, wenn nur der Punktestand beobachtet wird.'));
-
-  function reasonGroup(team, teamLabel, color){
-    const wrap = el('div',{style:'margin-bottom:12px;'});
-    wrap.appendChild(el('div',{style:'font-weight:700;font-size:13px;margin-bottom:6px;color:'+color+';'}, 'Punkt · '+teamLabel));
-    const row = el('div',{class:'row'});
-    POINT_REASONS.forEach(r=>{
-      row.appendChild(el('button',{class:'btn secondary', style:'flex:1 1 45%;', onclick:()=>logQuickPoint(match, team, r.code)}, r.label));
-    });
-    wrap.appendChild(row);
-    return wrap;
-  }
-
-  card.appendChild(reasonGroup('home', state.teamName, 'var(--home)'));
-  card.appendChild(reasonGroup('away', match.opponentName, 'var(--away)'));
-  main.appendChild(card);
-
-  // Optionaler (diktierter) Kommentar zum zuletzt erfassten Punkt.
-  commentSection(main, match);
-}
-
+// Fehler-Erfassung: erscheint erst NACHDEM ein Punkt gefallen ist (egal ob per Feld-Tagging mit
+// Spieler+Linie, oder per manuellem Punkt-Button) — dann optional eine/mehrere Spieler:innen des
+// Teams auswählen, das den Punkt verloren hat, dazu einen getippten/diktierten Kommentar.
 function commentSection(main, match){
   if(!lastPointRally || lastPointRally.matchId!==match.id) return;
   const rally = lastPointRally.rally;
-  if(!rally.pointReason || rally.comment) return; // nichts (mehr) zu kommentieren
+  if(rally.comment) return; // schon erfasst — Button verschwindet
 
-  const scoredTeam = rally.pointReason.team;
-  const erringTeam = scoredTeam==='home' ? 'away' : 'home';
+  const erringTeam = lastPointRally.winningTeam==='home' ? 'away' : 'home';
   const erringTeamName = erringTeam==='home' ? state.teamName : match.opponentName;
 
   const card = el('div',{class:'card'});
 
   if(!commenting){
-    card.appendChild(el('button',{class:'btn secondary block', onclick:()=>{ commenting = {playerId:'', text:''}; render(); }},'💬 Kommentar zum letzten Punkt'));
+    card.appendChild(el('button',{class:'btn secondary block', onclick:()=>{ commenting = {playerIds:[], text:''}; render(); }},'⚠️ Fehler erfassen'));
     main.appendChild(card);
     return;
   }
 
-  card.appendChild(el('h2',{},'Kommentar: Fehler von '+erringTeamName));
+  card.appendChild(el('h2',{},'Fehler: '+erringTeamName));
   const roster = (erringTeam==='home' ? state.roster : match.opponentRoster).slice().sort((a,b)=>a.number-b.number);
-  const playerSel = el('select',{},[
-    el('option',{value:''},'Spieler (optional)'),
-    ...roster.map(p=>el('option',{value:p.id}, '#'+p.number+(p.name?(' '+p.name):'')))
-  ]);
-  playerSel.value = commenting.playerId||'';
-  playerSel.addEventListener('change', e=>{ commenting.playerId = e.target.value; });
-  card.appendChild(el('label',{},'Spieler'));
-  card.appendChild(playerSel);
+  card.appendChild(el('div',{style:'color:var(--muted);font-size:12px;margin-bottom:6px;'},'Spieler antippen, die den Fehler gemacht haben (einen oder mehrere, optional).'));
+  const grid = el('div',{class:'row'});
+  roster.forEach(p=>{
+    const selected = commenting.playerIds.includes(p.id);
+    grid.appendChild(el('button',{class: selected ? 'btn' : 'btn secondary', style:'flex:1 1 30%;', onclick:()=>{
+      commenting.playerIds = selected ? commenting.playerIds.filter(id=>id!==p.id) : [...commenting.playerIds, p.id];
+      render();
+    }}, '#'+p.number+(p.name?(' '+p.name):'')));
+  });
+  card.appendChild(grid);
 
   const textarea = el('textarea',{rows:3, placeholder:'Was ist passiert? Über die Mikrofon-Taste der Tastatur diktieren oder tippen.',
-    style:'width:100%;font:inherit;padding:8px;border-radius:8px;border:1px solid var(--line);background:var(--bg2);color:inherit;margin-top:6px;box-sizing:border-box;'});
+    style:'width:100%;font:inherit;padding:8px;border-radius:8px;border:1px solid var(--line);background:var(--bg2);color:inherit;margin-top:10px;box-sizing:border-box;'});
   textarea.value = commenting.text||'';
   textarea.addEventListener('input', e=>{ commenting.text = e.target.value; });
   card.appendChild(textarea);
@@ -931,7 +902,7 @@ function commentSection(main, match){
   const btnRow = el('div',{style:'display:flex;gap:10px;margin-top:12px;'});
   btnRow.appendChild(el('button',{class:'btn block', style:'flex:1', onclick:()=>{
     if(!commenting.text || !commenting.text.trim()){ alert('Bitte einen Kommentar eingeben oder diktieren.'); return; }
-    rally.comment = { team: erringTeam, playerId: commenting.playerId||null, text: commenting.text.trim() };
+    rally.comment = { team: erringTeam, playerIds: commenting.playerIds.slice(), text: commenting.text.trim() };
     saveState();
     commenting = null;
     lastPointRally = null;
@@ -943,32 +914,28 @@ function commentSection(main, match){
   main.appendChild(card);
 }
 
-// Zeigt die per Schnell-Punkte-Modus erfassten Punkte (Grund + ggf. Kommentar), neueste zuerst.
-function pointsLogSection(main, match){
+// Verlauf der gesendeten Fehler-Kommentare (neueste zuerst).
+function errorNotesSection(main, match){
   const entries = [];
   match.sets.forEach(set=>{
     set.rallies.forEach(rally=>{
-      if(rally.pointReason) entries.push({set, rally});
+      if(rally.comment) entries.push({set, rally});
     });
   });
   if(entries.length===0) return;
   const card = el('div',{class:'card'});
-  card.appendChild(el('h2',{},'📋 Punkte-Verlauf'));
+  card.appendChild(el('h2',{},'🗒 Fehler-Notizen'));
   entries.slice(-15).reverse().forEach(({set, rally})=>{
-    const pr = rally.pointReason;
-    const teamName = pr.team==='home' ? state.teamName : match.opponentName;
-    const reasonLabel = POINT_REASON_MAP[pr.reason] ? POINT_REASON_MAP[pr.reason].label : pr.reason;
+    const c = rally.comment;
+    const teamName = c.team==='home' ? state.teamName : match.opponentName;
+    const names = (c.playerIds||[]).map(pid=>playerName(c.team, pid, match)).join(', ');
     const row = el('div',{class:'list-item'});
     row.appendChild(el('div',{},[
       el('strong',{}, teamName+' '),
-      el('span',{class:'pill', style:'margin-left:4px'}, reasonLabel),
+      names ? el('span',{class:'pill', style:'margin-left:4px'}, names) : null,
       el('span',{style:'color:var(--muted);margin-left:8px;font-size:12px;'}, 'Satz '+set.setNumber)
     ]));
-    if(rally.comment){
-      const cTeamName = rally.comment.team==='home' ? state.teamName : match.opponentName;
-      const pName = rally.comment.playerId ? playerName(rally.comment.team, rally.comment.playerId, match) : null;
-      row.appendChild(el('div',{style:'color:var(--muted);font-size:12px;margin-top:4px;'}, '💬 '+cTeamName+(pName?(' · '+pName):'')+': '+rally.comment.text));
-    }
+    row.appendChild(el('div',{style:'color:var(--muted);font-size:12px;margin-top:4px;'}, c.text));
     card.appendChild(row);
   });
   main.appendChild(card);
@@ -1167,17 +1134,11 @@ function exportCSV(match){
         const to = a.toPoint ? (a.toPoint.x+','+a.toPoint.y) : '';
         rows.push([set.setNumber, ri+1, a.team==='home'?state.teamName:match.opponentName, SKILL_MAP[a.skill].label, playerName(a.team,a.playerId,match), a.code, from, to, '']);
       });
-      // Schnell-Punkte-Modus: Punkt-Grund (+ ggf. diktierter Kommentar zum Fehler des anderen Teams)
-      if(rally.pointReason){
-        const teamName = rally.pointReason.team==='home' ? state.teamName : match.opponentName;
-        const reasonLabel = POINT_REASON_MAP[rally.pointReason.reason] ? POINT_REASON_MAP[rally.pointReason.reason].label : rally.pointReason.reason;
-        let commentText = '';
-        if(rally.comment){
-          const cTeamName = rally.comment.team==='home' ? state.teamName : match.opponentName;
-          const pName = rally.comment.playerId ? playerName(rally.comment.team, rally.comment.playerId, match) : '';
-          commentText = cTeamName+(pName?(' ('+pName+')'):'')+': '+rally.comment.text;
-        }
-        rows.push([set.setNumber, ri+1, teamName, 'Punkt: '+reasonLabel, '', '', '', '', commentText]);
+      // Diktierter/getippter Fehler-Kommentar zum Team, das diesen Punkt verloren hat.
+      if(rally.comment){
+        const cTeamName = rally.comment.team==='home' ? state.teamName : match.opponentName;
+        const names = (rally.comment.playerIds||[]).map(pid=>playerName(rally.comment.team, pid, match)).join(', ');
+        rows.push([set.setNumber, ri+1, cTeamName, 'Fehler-Notiz', names, '', '', '', rally.comment.text]);
       }
     });
   });
