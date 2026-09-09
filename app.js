@@ -588,7 +588,15 @@ function renderLive(header, main){
     el('button',{class:'btn secondary', style:'flex:1', onclick:()=>manualPoint(match,'home')},'Punkt '+state.teamName),
     el('button',{class:'btn secondary', style:'flex:1', onclick:()=>manualPoint(match,'away')},'Punkt '+match.opponentName),
   ]));
-  board.appendChild(el('button',{class:'btn ghost block', style:'margin-top:8px', onclick:()=>undoLastAction(match)},'↩ Letzte Aktion rückgängig'));
+  {
+    const openRally = set.rallies[set.rallies.length-1];
+    const undoLabel = openRally.actions.length>0
+      ? '↩ Letzte Aktion rückgängig'
+      : (match.pointHistory && match.pointHistory.length>0)
+        ? '↩ Letzten Punkt rückgängig (Spielstand & Rotation)'
+        : '↩ Rückgängig';
+    board.appendChild(el('button',{class:'btn ghost block', style:'margin-top:8px', onclick:()=>undoLastAction(match)}, undoLabel));
+  }
   main.appendChild(board);
 
   // Wechsel: eine Spielerin/ein Spieler auf einer Position gegen jemanden von der Bank tauschen.
@@ -779,7 +787,33 @@ function logAction(match, skillCode, team, playerId, code, fromPoint, toPoint){
   }
 }
 
+// Merkt sich vor jedem gewerteten Punkt den kompletten Vorzustand (alle Sätze + Spielstatus),
+// damit ein bereits gewerteter Punkt (inkl. Spielstand, Rotation, Aufschlagrecht und ggf.
+// Satz-/Spielende) exakt rückgängig gemacht werden kann — kein Nachrechnen der Rotation nötig,
+// einfach den letzten Schnappschuss wiederherstellen.
+function pushPointHistory(match){
+  match.pointHistory = match.pointHistory || [];
+  match.pointHistory.push({ sets: JSON.parse(JSON.stringify(match.sets)), status: match.status });
+  if(match.pointHistory.length > 40) match.pointHistory.shift(); // Verlauf begrenzen
+}
+
+function undoLastPoint(match){
+  if(!match.pointHistory || match.pointHistory.length===0){
+    alert('Kein Punkt zum Rückgängigmachen vorhanden.');
+    return;
+  }
+  if(!confirm('Letzten Punkt wirklich rückgängig machen?\nSpielstand, Rotation und Aufschlagrecht (und ggf. Satz-/Spielende) werden zurückgesetzt.')) return;
+  const snap = match.pointHistory.pop();
+  match.sets = snap.sets;
+  match.status = snap.status;
+  lastPointRally = null;
+  commenting = null;
+  saveState();
+  go({name:'live', matchId:match.id}); // auch von der Statistik-Seite aus zurück zur Live-Ansicht
+}
+
 function closeRally(match, pointTo){
+  pushPointHistory(match);
   const set = currentSet(match);
   const wasServing = set.servingTeam;
   if(pointTo==='home') set.homeScore++; else set.awayScore++;
@@ -945,14 +979,16 @@ function undoLastAction(match){
   const set = currentSet(match);
   const rally = set.rallies[set.rallies.length-1];
   if(rally.actions.length>0){
+    // Noch offene Rally: nur den letzten Tag (Spieler/Linie/Bewertung) zurücknehmen, es wurde
+    // noch kein Punkt gewertet.
     rally.actions.pop();
     saveState(); render();
-  } else if(set.rallies.length>1){
-    // Letzten Punkt rückgängig machen ist bei Rotation komplex - wir entfernen nur die leere Rally
-    set.rallies.pop();
-    saveState(); render();
+  } else if(match.pointHistory && match.pointHistory.length>0){
+    // Die aktuelle Rally ist leer -> der letzte Punkt wurde bereits gewertet. Diesen komplett
+    // rückgängig machen (Spielstand, Rotation, Aufschlagrecht, ggf. Satz-/Spielende).
+    undoLastPoint(match);
   } else {
-    alert('Nichts zum Rückgängigmachen in dieser Rally.');
+    alert('Nichts zum Rückgängigmachen.');
   }
 }
 
@@ -1088,6 +1124,9 @@ function renderStats(header, main){
     el('button',{class:'btn secondary', style:'flex:1', onclick:()=>exportCSV(match)},'CSV exportieren'),
     el('button',{class:'btn secondary', style:'flex:1', onclick:()=>window.print()},'Als PDF drucken'),
   ]));
+  if(match.status==='finished' && match.pointHistory && match.pointHistory.length>0){
+    summary.appendChild(el('button',{class:'btn ghost block', style:'margin-top:8px', onclick:()=>undoLastPoint(match)},'↩ Letzten Punkt rückgängig (Spiel wieder öffnen)'));
+  }
   main.appendChild(summary);
 
   renderStatTables(main, match);
