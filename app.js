@@ -26,6 +26,18 @@ const EVALS = [
 // Codes, bei denen eine '#' direkt einen Punkt für das agierende Team bedeutet
 const POINT_ON_PERFECT = ['S','A','B'];
 
+// Vereinfachter Punkte-Modus (z.B. für Co-Trainer:innen, die nicht beide Teams im Detail
+// tracken können): statt Aktion für Aktion zu erfassen, wird nur der Punkt selbst mit einem
+// kurzen Grund erfasst — jeder Punkt des einen Teams ist automatisch ein Fehler/Gegenpunkt-
+// Ursache des anderen. Es gibt nur wenige Möglichkeiten, wie ein Ballwechsel endet.
+const POINT_REASONS = [
+  {code:'ace',      label:'Ass'},
+  {code:'attack',   label:'Angriff'},
+  {code:'block',    label:'Block'},
+  {code:'oppError', label:'Gegner-Fehler'},
+];
+const POINT_REASON_MAP = Object.fromEntries(POINT_REASONS.map(r=>[r.code,r]));
+
 const POSITIONS = [1,2,3,4,5,6]; // FIVB-Rotationspositionen
 
 // Richtungserfassung (wer schlägt wohin) — nur für Aufschlag und Angriff
@@ -61,6 +73,11 @@ let subbing = null;
 // App-Vorschau: läuft komplett im Arbeitsspeicher, wird NICHT in localStorage gespeichert und
 // überschreibt die echten Daten des Nutzers nicht (siehe startDemo/saveState/go).
 let demoMode = false;
+// Zuletzt per Schnell-Punkte-Modus abgeschlossene Rally, für den optionalen Kommentar danach:
+// {matchId, rally} oder null (kein offener "letzter Punkt" mehr zu kommentieren).
+let lastPointRally = null;
+// Laufendes Kommentar-Formular zum letzten Punkt: {playerId, text} oder null (Formular geschlossen)
+let commenting = null;
 
 function uid(){ return Math.random().toString(36).slice(2,10)+Date.now().toString(36); }
 
@@ -215,7 +232,7 @@ function buildCourt(set, match, opts={}){
 }
 
 function go(r){
-  tagging = null; subbing = null;
+  tagging = null; subbing = null; commenting = null;
   if(demoMode && r.name==='home'){
     // Demo verlassen: echte (gespeicherte) Daten wiederherstellen, sobald es zurück zur Startseite geht.
     demoMode = false;
@@ -579,19 +596,22 @@ function renderLive(header, main){
       el('div',{style:'font-size:40px;font-weight:800;color:var(--away)'}, String(set.awayScore))
     ]),
   ]));
-  board.appendChild(el('div',{style:'display:flex;gap:10px;margin-top:10px;'},[
-    el('button',{class:'btn secondary', style:'flex:1', onclick:()=>manualPoint(match,'home')},'Punkt '+state.teamName),
-    el('button',{class:'btn secondary', style:'flex:1', onclick:()=>manualPoint(match,'away')},'Punkt '+match.opponentName),
-  ]));
   board.appendChild(el('button',{class:'btn ghost block', style:'margin-top:8px', onclick:()=>undoLastAction(match)},'↩ Letzte Aktion rückgängig'));
   main.appendChild(board);
+
+  // Schnell-Punkte-Modus: für Co-Trainer:innen, die nicht beide Teams im Detail tracken können —
+  // nur den Punkt mit kurzem Grund erfassen, plus optional ein diktierter Kommentar danach.
+  quickPointSection(main, match, set);
 
   // Wechsel: eine Spielerin/ein Spieler auf einer Position gegen jemanden von der Bank tauschen.
   substitutionSection(main, match, set);
 
   // Spielfeld: zeigt die Aufstellung UND dient direkt zum Erfassen einer Aktion —
-  // kein separates/extra Feld mehr, alles läuft in dieser einen Karte.
+  // kein separates/extra Feld mehr, alles läuft in dieser einen Karte (für volles Scouting).
   fieldSection(main, match, set);
+
+  // Punkte-Verlauf (Schnell-Modus): zeigt erfasste Punkte mit Grund + Kommentar.
+  pointsLogSection(main, match);
 
   // Aktionen dieser Rally
   const rallyCard = el('div',{class:'card'});
@@ -804,6 +824,156 @@ function manualPoint(match, team){
   closeRally(match, team);
 }
 
+// Schnell-Punkte-Modus: eine Spielerin/ein Spieler-lose Kurzerfassung — nur Team + Grund, kein
+// Aufschlag/Annahme/Zielort-Tagging. Jeder Punkt des einen Teams gilt automatisch als Fehler-
+// Ursache beim anderen (der Grund-Button beschreibt schon, wie der Ballwechsel endete).
+function logQuickPoint(match, team, reasonCode){
+  const set = currentSet(match);
+  const rally = set.rallies[set.rallies.length-1];
+  rally.pointReason = { team, reason: reasonCode };
+  lastPointRally = { matchId: match.id, rally };
+  commenting = null;
+  closeRally(match, team); // score, Rotation, Satz-/Spielende — wie bei jedem anderen Punkt
+}
+
+function quickPointSection(main, match, set){
+  const card = el('div',{class:'card'});
+  card.appendChild(el('h2',{},'Punkt erfassen'));
+  card.appendChild(el('div',{style:'color:var(--muted);font-size:12px;margin-bottom:10px;'},'Grund antippen — Punkt, Rotation und Aufschlagwechsel laufen automatisch mit. Praktisch, wenn nur der Punktestand beobachtet wird.'));
+
+  function reasonGroup(team, teamLabel, color){
+    const wrap = el('div',{style:'margin-bottom:12px;'});
+    wrap.appendChild(el('div',{style:'font-weight:700;font-size:13px;margin-bottom:6px;color:'+color+';'}, 'Punkt · '+teamLabel));
+    const row = el('div',{class:'row'});
+    POINT_REASONS.forEach(r=>{
+      row.appendChild(el('button',{class:'btn secondary', style:'flex:1 1 45%;', onclick:()=>logQuickPoint(match, team, r.code)}, r.label));
+    });
+    wrap.appendChild(row);
+    return wrap;
+  }
+
+  card.appendChild(reasonGroup('home', state.teamName, 'var(--home)'));
+  card.appendChild(reasonGroup('away', match.opponentName, 'var(--away)'));
+  main.appendChild(card);
+
+  // Optionaler (diktierter) Kommentar zum zuletzt erfassten Punkt.
+  commentSection(main, match);
+}
+
+function commentSection(main, match){
+  if(!lastPointRally || lastPointRally.matchId!==match.id) return;
+  const rally = lastPointRally.rally;
+  if(!rally.pointReason || rally.comment) return; // nichts (mehr) zu kommentieren
+
+  const scoredTeam = rally.pointReason.team;
+  const erringTeam = scoredTeam==='home' ? 'away' : 'home';
+  const erringTeamName = erringTeam==='home' ? state.teamName : match.opponentName;
+
+  const card = el('div',{class:'card'});
+
+  if(!commenting){
+    card.appendChild(el('button',{class:'btn secondary block', onclick:()=>{ commenting = {playerId:'', text:''}; render(); }},'💬 Kommentar zum letzten Punkt'));
+    main.appendChild(card);
+    return;
+  }
+
+  card.appendChild(el('h2',{},'Kommentar: Fehler von '+erringTeamName));
+  const roster = (erringTeam==='home' ? state.roster : match.opponentRoster).slice().sort((a,b)=>a.number-b.number);
+  const playerSel = el('select',{},[
+    el('option',{value:''},'Spieler (optional)'),
+    ...roster.map(p=>el('option',{value:p.id}, '#'+p.number+(p.name?(' '+p.name):'')))
+  ]);
+  playerSel.value = commenting.playerId||'';
+  playerSel.addEventListener('change', e=>{ commenting.playerId = e.target.value; });
+  card.appendChild(el('label',{},'Spieler'));
+  card.appendChild(playerSel);
+
+  const textarea = el('textarea',{rows:3, placeholder:'Was ist passiert? Über die Mikrofon-Taste der Tastatur diktieren oder tippen.',
+    style:'width:100%;font:inherit;padding:8px;border-radius:8px;border:1px solid var(--line);background:var(--bg2);color:inherit;margin-top:6px;box-sizing:border-box;'});
+  textarea.value = commenting.text||'';
+  textarea.addEventListener('input', e=>{ commenting.text = e.target.value; });
+  card.appendChild(textarea);
+
+  // Live-Diktat per Spracherkennung, wo der Browser das unterstützt (Chrome/Android). iPhones
+  // (Safari) haben keine Web-Speech-API — dort einfach über die Mikrofon-Taste der Tastatur
+  // direkt in das Textfeld diktieren, das funktioniert unabhängig davon immer.
+  const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if(SpeechRec){
+    let recognizer = null, listening = false;
+    const micBtn = el('button',{class:'btn secondary', style:'margin-top:8px;'}, '🎤 Diktieren starten');
+    micBtn.addEventListener('click', ()=>{
+      if(listening){ recognizer && recognizer.stop(); return; }
+      recognizer = new SpeechRec();
+      recognizer.lang = 'de-DE';
+      recognizer.continuous = true;
+      recognizer.interimResults = false;
+      recognizer.onresult = (ev)=>{
+        let added = '';
+        for(let i=ev.resultIndex; i<ev.results.length; i++){
+          if(ev.results[i].isFinal) added += ev.results[i][0].transcript + ' ';
+        }
+        if(added.trim()){
+          commenting.text = (commenting.text ? commenting.text+' ' : '') + added.trim();
+          textarea.value = commenting.text;
+        }
+      };
+      recognizer.onerror = ()=>{ listening=false; micBtn.textContent='🎤 Diktieren starten'; };
+      recognizer.onend = ()=>{ listening=false; micBtn.textContent='🎤 Diktieren starten'; };
+      recognizer.start();
+      listening = true;
+      micBtn.textContent = '⏹ Aufnahme stoppen';
+    });
+    card.appendChild(micBtn);
+  } else {
+    card.appendChild(el('div',{style:'color:var(--muted);font-size:11px;margin-top:8px;'},'Tipp: Über die Mikrofon-Taste auf der Tastatur kannst du direkt in dieses Feld diktieren.'));
+  }
+
+  const btnRow = el('div',{style:'display:flex;gap:10px;margin-top:12px;'});
+  btnRow.appendChild(el('button',{class:'btn block', style:'flex:1', onclick:()=>{
+    if(!commenting.text || !commenting.text.trim()){ alert('Bitte einen Kommentar eingeben oder diktieren.'); return; }
+    rally.comment = { team: erringTeam, playerId: commenting.playerId||null, text: commenting.text.trim() };
+    saveState();
+    commenting = null;
+    lastPointRally = null;
+    render();
+  }},'Senden'));
+  btnRow.appendChild(el('button',{class:'btn ghost', style:'flex:1', onclick:()=>{ commenting=null; render(); }},'Verwerfen'));
+  card.appendChild(btnRow);
+
+  main.appendChild(card);
+}
+
+// Zeigt die per Schnell-Punkte-Modus erfassten Punkte (Grund + ggf. Kommentar), neueste zuerst.
+function pointsLogSection(main, match){
+  const entries = [];
+  match.sets.forEach(set=>{
+    set.rallies.forEach(rally=>{
+      if(rally.pointReason) entries.push({set, rally});
+    });
+  });
+  if(entries.length===0) return;
+  const card = el('div',{class:'card'});
+  card.appendChild(el('h2',{},'📋 Punkte-Verlauf'));
+  entries.slice(-15).reverse().forEach(({set, rally})=>{
+    const pr = rally.pointReason;
+    const teamName = pr.team==='home' ? state.teamName : match.opponentName;
+    const reasonLabel = POINT_REASON_MAP[pr.reason] ? POINT_REASON_MAP[pr.reason].label : pr.reason;
+    const row = el('div',{class:'list-item'});
+    row.appendChild(el('div',{},[
+      el('strong',{}, teamName+' '),
+      el('span',{class:'pill', style:'margin-left:4px'}, reasonLabel),
+      el('span',{style:'color:var(--muted);margin-left:8px;font-size:12px;'}, 'Satz '+set.setNumber)
+    ]));
+    if(rally.comment){
+      const cTeamName = rally.comment.team==='home' ? state.teamName : match.opponentName;
+      const pName = rally.comment.playerId ? playerName(rally.comment.team, rally.comment.playerId, match) : null;
+      row.appendChild(el('div',{style:'color:var(--muted);font-size:12px;margin-top:4px;'}, '💬 '+cTeamName+(pName?(' · '+pName):'')+': '+rally.comment.text));
+    }
+    card.appendChild(row);
+  });
+  main.appendChild(card);
+}
+
 function undoLastAction(match){
   const set = currentSet(match);
   const rally = set.rallies[set.rallies.length-1];
@@ -989,14 +1159,26 @@ function thStyle(){ return 'text-align:center;padding:6px 4px;border-bottom:1px 
 function tdStyle(){ return 'text-align:center;padding:6px 4px;border-bottom:1px solid var(--line);'; }
 
 function exportCSV(match){
-  let rows = [['Satz','Rally','Team','Skill','Spieler','Bewertung','Von(x,y)','Ziel(x,y)']];
+  let rows = [['Satz','Rally','Team','Skill','Spieler','Bewertung','Von(x,y)','Ziel(x,y)','Kommentar']];
   match.sets.forEach(set=>{
     set.rallies.forEach((rally,ri)=>{
       rally.actions.forEach(a=>{
         const from = a.fromPoint ? (a.fromPoint.x+','+a.fromPoint.y) : '';
         const to = a.toPoint ? (a.toPoint.x+','+a.toPoint.y) : '';
-        rows.push([set.setNumber, ri+1, a.team==='home'?state.teamName:match.opponentName, SKILL_MAP[a.skill].label, playerName(a.team,a.playerId,match), a.code, from, to]);
+        rows.push([set.setNumber, ri+1, a.team==='home'?state.teamName:match.opponentName, SKILL_MAP[a.skill].label, playerName(a.team,a.playerId,match), a.code, from, to, '']);
       });
+      // Schnell-Punkte-Modus: Punkt-Grund (+ ggf. diktierter Kommentar zum Fehler des anderen Teams)
+      if(rally.pointReason){
+        const teamName = rally.pointReason.team==='home' ? state.teamName : match.opponentName;
+        const reasonLabel = POINT_REASON_MAP[rally.pointReason.reason] ? POINT_REASON_MAP[rally.pointReason.reason].label : rally.pointReason.reason;
+        let commentText = '';
+        if(rally.comment){
+          const cTeamName = rally.comment.team==='home' ? state.teamName : match.opponentName;
+          const pName = rally.comment.playerId ? playerName(rally.comment.team, rally.comment.playerId, match) : '';
+          commentText = cTeamName+(pName?(' ('+pName+')'):'')+': '+rally.comment.text;
+        }
+        rows.push([set.setNumber, ri+1, teamName, 'Punkt: '+reasonLabel, '', '', '', '', commentText]);
+      }
     });
   });
   const csv = rows.map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(',')).join('\n');
