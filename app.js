@@ -36,6 +36,10 @@ const ATTACK_TYPES = ['harter Angriffsschlag','platzierter Angriff','Lob / Heber
 const BLOCK_TYPES = ['direkter Blockpunkt','Blockberührung (Ball nicht mehr spielbar)','Block gegen Schnellangriff','Block gegen Außen/Diagonal','Block-Abpraller ins gegnerische Feld'];
 const SERVE_TYPES = ['Ass (direkt ins Feld)','Annahmefehler (Ball ins Aus)','erzwungener unkontrollierter Ballwechsel'];
 const OPP_ERROR_TYPES = ['Aufschlag ins Aus','Angriff ins Aus','Angriff ins Netz','Netzberührung','Übertreten der Mittellinie','Vier Ballkontakte','Falsche Rotation','Ball gehalten/geführt','Doppelberührung'];
+// Für diese beiden Gegner-Fehler-Arten ist der/die Angreifer:in eindeutig identifizierbar — dort
+// nach der Art optional (ein Tap, überspringbar) fragen, wer den Angriffsfehler gemacht hat, damit
+// "Angriffsfehler pro Spieler" auch über den schnellen Gegner-Fehler-Button erfasst werden kann.
+const OE_ATTACK_ERROR_TYPES = ['Angriff ins Aus','Angriff ins Netz'];
 
 const POSITIONS = [1,2,3,4,5,6]; // FIVB-Rotationspositionen
 
@@ -801,6 +805,31 @@ function fieldQuickAttackServeSection(fieldCard, match, set){
 // Schnellerfassung Block: bis zu 3 Spieler:innen DESSELBEN Teams antippen (Mehrfachblock),
 // danach die Art wählen — das ist direkt der Punkt für das blockende Team.
 function fieldQuickBlockSection(fieldCard, match, set){
+  if(tagging.type){
+    // Block-Art ist schon gewählt (das war bereits der Punkt) — optional, mit einem Tap
+    // überspringbar: gegen welche:n Angreifer:in ging der Block? Ohne diese Zuordnung lässt sich
+    // "geblockte Angriffe pro Spieler" (Angreiferseite) nicht auswerten.
+    const opponentTeam = tagging.team==='home' ? 'away' : 'home';
+    const opponentRoster = (opponentTeam==='home' ? state.roster : match.opponentRoster).slice().sort((a,b)=>a.number-b.number);
+    fieldCard.appendChild(el('div',{style:'color:var(--accent);font-weight:600;font-size:13px;margin-bottom:8px;'}, 'Block: '+tagging.type));
+    fieldCard.appendChild(el('div',{style:'color:var(--muted);font-size:12px;margin-bottom:8px;'}, 'Optional: gegen wen ging der Block?'));
+    const grid = el('div',{class:'row'});
+    opponentRoster.forEach(p=>{
+      grid.appendChild(el('button',{class:'btn secondary', style:'flex:1 1 30%;', onclick:()=>{
+        const t = tagging;
+        tagging = null;
+        logQuickPoint(match, {skillCode:'B', team:t.team, playerIds:t.playerIds, type:t.type, blockedPlayerId:p.id, blockedTeam:opponentTeam});
+      }}, '#'+p.number+(p.name?(' '+p.name):'')));
+    });
+    fieldCard.appendChild(grid);
+    fieldCard.appendChild(el('button',{class:'btn ghost block', style:'margin-top:10px', onclick:()=>{
+      const t = tagging;
+      tagging = null;
+      logQuickPoint(match, {skillCode:'B', team:t.team, playerIds:t.playerIds, type:t.type});
+    }},'Ohne Zuordnung speichern'));
+    return;
+  }
+
   const hintText = tagging.playerIds.length===0
     ? 'Bis zu 3 Spieler:innen des blockenden Teams antippen.'
     : ('Ausgewählt: '+tagging.playerIds.length+'/3 — weitere antippen (gleiches Team) oder Art wählen.');
@@ -836,11 +865,7 @@ function fieldQuickBlockSection(fieldCard, match, set){
     fieldCard.appendChild(el('label',{style:'margin-top:8px;'},'Art des Blocks'));
     const grid = el('div',{class:'row'});
     BLOCK_TYPES.forEach(type=>{
-      grid.appendChild(el('button',{class:'btn secondary', style:'flex:1 1 45%;', onclick:()=>{
-        const t = tagging;
-        tagging = null;
-        logQuickPoint(match, {skillCode:'B', team:t.team, playerIds:t.playerIds, type});
-      }}, type));
+      grid.appendChild(el('button',{class:'btn secondary', style:'flex:1 1 45%;', onclick:()=>{ tagging.type = type; render(); }}, type));
     });
     fieldCard.appendChild(grid);
   }
@@ -848,7 +873,8 @@ function fieldQuickBlockSection(fieldCard, match, set){
 }
 
 // Schnellerfassung Gegner-Fehler: kein Spieler nötig — nur welches Team den Punkt bekommt,
-// dann welche Art Fehler es beim Gegner war.
+// dann welche Art Fehler es beim Gegner war. Bei "Angriff ins Aus/Netz" wird danach optional
+// (überspringbar) noch gefragt, wer den Fehler gemacht hat, für die Angriffsfehler-Statistik.
 function fieldQuickOpponentErrorSection(fieldCard, match){
   fieldCard.appendChild(el('div',{style:'color:var(--accent);font-weight:600;font-size:13px;margin-bottom:8px;'}, 'Gegner-Fehler erfassen'));
   if(!tagging.team){
@@ -857,11 +883,32 @@ function fieldQuickOpponentErrorSection(fieldCard, match){
     row.appendChild(el('button',{class:'btn secondary', style:'flex:1', onclick:()=>{ tagging.team='home'; render(); }}, state.teamName));
     row.appendChild(el('button',{class:'btn secondary', style:'flex:1', onclick:()=>{ tagging.team='away'; render(); }}, match.opponentName));
     fieldCard.appendChild(row);
+  } else if(tagging.type){
+    // Nur für Angriffsfehler erreichbar (siehe unten) — optionale Spieler-Zuordnung.
+    const erringTeam = tagging.team==='home' ? 'away' : 'home';
+    const roster = (erringTeam==='home' ? state.roster : match.opponentRoster).slice().sort((a,b)=>a.number-b.number);
+    fieldCard.appendChild(el('div',{style:'color:var(--muted);font-size:12px;margin-bottom:8px;'}, tagging.type+' — optional: wer hat den Fehler gemacht?'));
+    const grid = el('div',{class:'row'});
+    roster.forEach(p=>{
+      grid.appendChild(el('button',{class:'btn secondary', style:'flex:1 1 30%;', onclick:()=>{
+        const t = tagging;
+        tagging = null;
+        logQuickPoint(match, {skillCode:'OE', team:t.team, type:t.type, errorPlayerId:p.id, errorTeam:erringTeam});
+      }}, '#'+p.number+(p.name?(' '+p.name):'')));
+    });
+    fieldCard.appendChild(grid);
+    fieldCard.appendChild(el('button',{class:'btn ghost block', style:'margin-top:10px', onclick:()=>{
+      const t = tagging;
+      tagging = null;
+      logQuickPoint(match, {skillCode:'OE', team:t.team, type:t.type});
+    }},'Ohne Zuordnung speichern'));
+    return;
   } else {
     fieldCard.appendChild(el('div',{style:'color:var(--muted);font-size:12px;margin-bottom:8px;'}, 'Fehlerart des Gegners wählen:'));
     const grid = el('div',{class:'row'});
     OPP_ERROR_TYPES.forEach(type=>{
       grid.appendChild(el('button',{class:'btn secondary', style:'flex:1 1 45%;', onclick:()=>{
+        if(OE_ATTACK_ERROR_TYPES.includes(type)){ tagging.type = type; render(); return; }
         const t = tagging;
         tagging = null;
         logQuickPoint(match, {skillCode:'OE', team:t.team, type});
@@ -995,6 +1042,12 @@ function logQuickPoint(match, opts){
     action.fromPoint = {x:Math.round(opts.fromPoint.x*10)/10, y:Math.round(opts.fromPoint.y*10)/10};
     action.toPoint = {x:Math.round(opts.toPoint.x*10)/10, y:Math.round(opts.toPoint.y*10)/10};
   }
+  // Optionale Spieler-Zuordnung: wer hat bei einem Gegner-Fehler den Angriffsfehler gemacht, bzw.
+  // welche:r gegnerische Angreifer:in wurde beim Block geblockt — beides freiwillig (siehe die
+  // jeweiligen fieldQuick*-Funktionen), fließt in computeStats() in die Angriffsstatistik der
+  // betroffenen Person ein, ohne die Punkt-/Team-Zuordnung der Aktion selbst zu verändern.
+  if(opts.errorPlayerId){ action.errorPlayerId = opts.errorPlayerId; action.errorTeam = opts.errorTeam; }
+  if(opts.blockedPlayerId){ action.blockedPlayerId = opts.blockedPlayerId; action.blockedTeam = opts.blockedTeam; }
   rally.actions.push(action);
   lastPointRally = { matchId: match.id, rally, winningTeam: opts.team };
   commenting = null;
@@ -1005,6 +1058,22 @@ function closeRally(match, pointTo){
   pushPointHistory(match);
   const set = currentSet(match);
   const wasServing = set.servingTeam;
+
+  // Datengrundlage für Rotations-/Sideout-/Break- und Verlaufs-Auswertungen: an der geschlossenen
+  // Rally selbst festhalten, wer zu diesem Zeitpunkt aufgeschlagen hat, welche Aufstellung beide
+  // Teams hatten, wer gewonnen hat und wie der Spielstand VOR diesem Punkt war. Nur so bleibt das
+  // später (auch nach weiteren Rotationen/Satzwechseln) rückwirkend korrekt auswertbar, ohne den
+  // ganzen Satz von vorne "nachzuspielen". Alte, vor diesem Update gespeicherte Rallys haben diese
+  // Felder nicht — Auswertungsfunktionen müssen das vertragen (einfach überspringen).
+  const closingRally = set.rallies[set.rallies.length-1];
+  closingRally.winningTeam = pointTo;
+  closingRally.startServingTeam = wasServing;
+  closingRally.homeRotation = [...set.homeLineup];
+  closingRally.awayRotation = [...set.awayLineup];
+  closingRally.homeScoreBefore = set.homeScore;
+  closingRally.awayScoreBefore = set.awayScore;
+  closingRally.setNumber = set.setNumber;
+
   if(pointTo==='home') set.homeScore++; else set.awayScore++;
 
   if(pointTo!==wasServing){
@@ -1187,27 +1256,37 @@ function computeStats(match){
   const stats = { home:{}, away:{} };
   ['home','away'].forEach(team=>{
     const roster = team==='home' ? state.roster : match.opponentRoster;
-    roster.forEach(p=>{ stats[team][p.id] = { number:p.number, name:p.name||'', bySkill:{} }; });
+    roster.forEach(p=>{ stats[team][p.id] = { number:p.number, name:p.name||'', bySkill:{}, blockedAgainst:0 }; });
   });
+  function ensure(team, pid){
+    const t = stats[team];
+    if(!t[pid]) t[pid] = { number: playerNumber(team,pid,match), name:'', bySkill:{}, blockedAgainst:0 };
+    return t[pid];
+  }
+  function creditSkill(p, skill, code){
+    if(!p.bySkill[skill]) p.bySkill[skill] = {total:0, perfect:0, good:0, neutral:0, poor:0, error:0};
+    const s = p.bySkill[skill];
+    s.total++;
+    if(code==='#') s.perfect++;
+    else if(code==='+') s.good++;
+    else if(code==='!') s.neutral++;
+    else if(code==='-') s.poor++;
+    else if(code==='=') s.error++;
+  }
   match.sets.forEach(set=>{
     set.rallies.forEach(rally=>{
       rally.actions.forEach(a=>{
         // Block (Schnellerfassung) kann mehrere Spieler:innen haben (a.playerIds); alle anderen
         // Aktionen genau eine:n (a.playerId); Gegner-Fehler hat gar keine:n (ids bleibt leer).
         const ids = a.playerIds || (a.playerId ? [a.playerId] : []);
-        ids.forEach(pid=>{
-        const t = stats[a.team];
-        if(!t[pid]) t[pid] = { number: playerNumber(a.team,pid,match), name:'', bySkill:{} };
-        const p = t[pid];
-        if(!p.bySkill[a.skill]) p.bySkill[a.skill] = {total:0, perfect:0, good:0, neutral:0, poor:0, error:0};
-        const s = p.bySkill[a.skill];
-        s.total++;
-        if(a.code==='#') s.perfect++;
-        else if(a.code==='+') s.good++;
-        else if(a.code==='!') s.neutral++;
-        else if(a.code==='-') s.poor++;
-        else if(a.code==='=') s.error++;
-        });
+        ids.forEach(pid=> creditSkill(ensure(a.team, pid), a.skill, a.code));
+        // Optionale Zuordnung bei Gegner-Fehler: der Angriffsfehler wird der Person angerechnet,
+        // die ihn tatsächlich begangen hat (unter "A" als Fehler gezählt) — unabhängig davon,
+        // welchem Team der Punkt selbst gutgeschrieben wird.
+        if(a.errorPlayerId) creditSkill(ensure(a.errorTeam, a.errorPlayerId), 'A', '=');
+        // Optionale Zuordnung beim Block: wer wurde geblockt — eigene Kennzahl, kein "Fehler" in
+        // der Bewertungsskala, da hierfür keine allgemeingültige Einzelschuld existiert.
+        if(a.blockedPlayerId) ensure(a.blockedTeam, a.blockedPlayerId).blockedAgainst++;
       });
     });
   });
