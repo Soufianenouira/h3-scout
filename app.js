@@ -81,6 +81,9 @@ let demoMode = false;
 let lastPointRally = null;
 // Laufendes Fehler-Formular: {playerIds:[...], text} oder null (Formular geschlossen)
 let commenting = null;
+// Aufgeklappte Rally-Details im "Letzte Rallys"-Verlauf: {matchId, rally} oder null (zugeklappt) —
+// bewusst als Inline-Ausklappen statt Popup gelöst (siehe UX-Grundsatz "keine unnötigen Popups").
+let expandedRally = null;
 
 function uid(){ return Math.random().toString(36).slice(2,10)+Date.now().toString(36); }
 
@@ -235,7 +238,7 @@ function buildCourt(set, match, opts={}){
 }
 
 function go(r){
-  tagging = null; subbing = null; commenting = null;
+  tagging = null; subbing = null; commenting = null; expandedRally = null;
   if(demoMode && r.name==='home'){
     // Demo verlassen: echte (gespeicherte) Daten wiederherstellen, sobald es zurück zur Startseite geht.
     demoMode = false;
@@ -463,7 +466,14 @@ function renderNewMatch(header, main){
 }
 
 function newSet(setNumber, homeLineup, awayLineup, servingTeam){
-  return { setNumber, homeScore:0, awayScore:0, homeLineup:[...homeLineup], awayLineup:[...awayLineup], servingTeam, rallies:[{actions:[]}], winner:null };
+  return {
+    setNumber, homeScore:0, awayScore:0, homeLineup:[...homeLineup], awayLineup:[...awayLineup], servingTeam,
+    rallies:[{actions:[]}], winner:null,
+    // Unveränderliche Kopie der Start-Aufstellung dieses Satzes — nötig, um später aus einem
+    // beliebigen Rotations-Schnappschuss (rally.homeRotation/awayRotation) die Rotationsnummer
+    // 1–6 zu bestimmen (homeLineup/awayLineup selbst werden ja live weiterrotiert).
+    startHomeLineup:[...homeLineup], startAwayLineup:[...awayLineup],
+  };
 }
 
 /* ============================ App-Vorschau (Demo) ============================ */
@@ -650,6 +660,9 @@ function renderLive(header, main){
   // Statistik & Diagramme sind während des ganzen Spiels/Satzes durchgehend sichtbar,
   // nicht nur über die separate Statistik-Seite.
   main.appendChild(el('div',{style:'font-weight:800;font-size:15px;margin:18px 4px 4px;color:var(--muted);'},'📊 Statistik (live)'));
+  renderRallyHistoryStrip(main, match);
+  renderTeamAnalytics(main, match);
+  renderRotationTable(main, match, 'home');
   renderStatTables(main, match);
   renderDirections(main, match);
 
@@ -1252,7 +1265,11 @@ function undoLastAction(match){
 
 /* ============================ Statistik ============================ */
 
-function computeStats(match){
+// opts.setNumber: nur diesen Satz auswerten. opts.lastN: nur die letzten N Rallys (über alle
+// betrachteten Sätze hinweg, in Spielreihenfolge) — für Trend-Vergleiche ("ganzes Spiel" vs.
+// "letzte 10 Rallys"). Ohne opts: wie bisher das gesamte Spiel, inkl. der aktuell noch offenen
+// Rally (damit die Live-Statistik weiterhin sofort mitläuft, auch bevor ein Punkt fällt).
+function computeStats(match, opts={}){
   const stats = { home:{}, away:{} };
   ['home','away'].forEach(team=>{
     const roster = team==='home' ? state.roster : match.opponentRoster;
@@ -1273,24 +1290,187 @@ function computeStats(match){
     else if(code==='-') s.poor++;
     else if(code==='=') s.error++;
   }
-  match.sets.forEach(set=>{
-    set.rallies.forEach(rally=>{
-      rally.actions.forEach(a=>{
-        // Block (Schnellerfassung) kann mehrere Spieler:innen haben (a.playerIds); alle anderen
-        // Aktionen genau eine:n (a.playerId); Gegner-Fehler hat gar keine:n (ids bleibt leer).
-        const ids = a.playerIds || (a.playerId ? [a.playerId] : []);
-        ids.forEach(pid=> creditSkill(ensure(a.team, pid), a.skill, a.code));
-        // Optionale Zuordnung bei Gegner-Fehler: der Angriffsfehler wird der Person angerechnet,
-        // die ihn tatsächlich begangen hat (unter "A" als Fehler gezählt) — unabhängig davon,
-        // welchem Team der Punkt selbst gutgeschrieben wird.
-        if(a.errorPlayerId) creditSkill(ensure(a.errorTeam, a.errorPlayerId), 'A', '=');
-        // Optionale Zuordnung beim Block: wer wurde geblockt — eigene Kennzahl, kein "Fehler" in
-        // der Bewertungsskala, da hierfür keine allgemeingültige Einzelschuld existiert.
-        if(a.blockedPlayerId) ensure(a.blockedTeam, a.blockedPlayerId).blockedAgainst++;
-      });
+  let sets = match.sets;
+  if(opts.setNumber!=null) sets = sets.filter(s=>s.setNumber===opts.setNumber);
+  let rallies = [];
+  sets.forEach(set=> rallies.push(...set.rallies));
+  if(opts.lastN!=null) rallies = rallies.slice(-opts.lastN);
+
+  rallies.forEach(rally=>{
+    rally.actions.forEach(a=>{
+      // Block (Schnellerfassung) kann mehrere Spieler:innen haben (a.playerIds); alle anderen
+      // Aktionen genau eine:n (a.playerId); Gegner-Fehler hat gar keine:n (ids bleibt leer).
+      const ids = a.playerIds || (a.playerId ? [a.playerId] : []);
+      ids.forEach(pid=> creditSkill(ensure(a.team, pid), a.skill, a.code));
+      // Optionale Zuordnung bei Gegner-Fehler: der Angriffsfehler wird der Person angerechnet,
+      // die ihn tatsächlich begangen hat (unter "A" als Fehler gezählt) — unabhängig davon,
+      // welchem Team der Punkt selbst gutgeschrieben wird.
+      if(a.errorPlayerId) creditSkill(ensure(a.errorTeam, a.errorPlayerId), 'A', '=');
+      // Optionale Zuordnung beim Block: wer wurde geblockt — eigene Kennzahl, kein "Fehler" in
+      // der Bewertungsskala, da hierfür keine allgemeingültige Einzelschuld existiert.
+      if(a.blockedPlayerId) ensure(a.blockedTeam, a.blockedPlayerId).blockedAgainst++;
     });
   });
   return stats;
+}
+
+// Angriffs-Kennzahlen einer Person aus computeStats()-Rohdaten ableiten. "Versuche" gibt es in
+// dieser App bewusst nicht im Data-Volley-Sinn (jede Ballberührung), da nur die punktentscheidende
+// Aktion pro Rally erfasst wird — hier daher pragmatisch definiert als Punkte + Fehler + geblockte
+// Angriffe. Effizienz-Formel wie vom Trainer vorgegeben: (Punkte − Fehler − geblockt) / Versuche.
+function playerAttackSummary(p){
+  const a = (p.bySkill && p.bySkill.A) || {total:0, perfect:0, error:0};
+  const blocked = p.blockedAgainst||0;
+  const attempts = a.total + blocked;
+  return {
+    points: a.perfect, errors: a.error, blocked, attempts,
+    efficiencyPct: attempts ? Math.round((a.perfect - a.error - blocked)/attempts*100) : null,
+  };
+}
+
+/* ============================ Automatische Analyse: Team / Rotation / Verlauf ============================ */
+// Baut auf den in closeRally() an jeder geschlossenen Rally hinterlegten Feldern auf: winningTeam,
+// startServingTeam, homeRotation/awayRotation (Aufstellungs-Schnappschuss), homeScoreBefore/
+// awayScoreBefore, setNumber. Rallys aus der Zeit vor diesem Update haben diese Felder nicht und
+// werden hier übersprungen — für bereits laufende Spiele füllt sich die Historie ab jetzt auf.
+
+// Rotationsnummer (1–6) einer Aufstellungs-Momentaufnahme relativ zur Start-Aufstellung des Satzes.
+// rotate() verschiebt jede Person um einen Index nach unten (Wraparound 0→5). Die Person, die zu
+// Satzbeginn auf Position 1 (Index 0) stand, steht nach k Rotationen auf Index (6−k) mod 6 — daraus
+// lässt sich k (und damit die Rotationsnummer k+1) eindeutig zurückrechnen, ohne den Satz von vorne
+// nachzuspielen. Beispiel: 0 Rotationen → Index 0 → Rotation 1; 1 Rotation → Index 5 → Rotation 2; …
+function rotationNumberOf(startLineup, currentLineup){
+  if(!startLineup || !currentLineup) return null;
+  const idx = currentLineup.indexOf(startLineup[0]);
+  if(idx===-1) return null;
+  return ((6 - idx) % 6) + 1;
+}
+
+// Klassifiziert, WIE eine geschlossene Rally entschieden wurde (Punktverteilung, Coach-Live,
+// Insights, Verlaufsanzeige). Bei der Schnellerfassung ist das die (einzige) letzte Aktion; bei der
+// ausführlichen "+"-Erfassung die Aktion, die die Rally per '#'-Punkt oder '='-Fehler beendet hat.
+// Ein manueller "Punkt {Team}"-Klick hinterlässt keine Aktion — dann bleibt die Art unbekannt.
+function pointTypeOf(rally){
+  if(!rally.actions || rally.actions.length===0) return {category:'Manuell', skill:null};
+  const last = rally.actions[rally.actions.length-1];
+  if(last.skill==='OE') return {category:'Gegnerfehler', skill:'OE'};
+  if(last.code==='='){
+    const label = last.skill==='S' ? 'Aufschlagfehler' : last.skill==='R' ? 'Annahmefehler'
+      : last.skill==='A' ? 'Angriffsfehler' : last.skill==='B' ? 'Blockfehler'
+      : (SKILL_MAP[last.skill]||{label:last.skill}).label+'-Fehler';
+    return {category:label, skill:last.skill};
+  }
+  if(last.code==='#' && last.skill==='S') return {category:'Ass', skill:'S'};
+  if(last.code==='#' && last.skill==='A') return {category:'Angriffspunkt', skill:'A'};
+  if(last.code==='#' && last.skill==='B') return {category:'Blockpunkt', skill:'B'};
+  return {category:'Sonstiger Punkt', skill:last.skill};
+}
+
+// Flacht alle "neuen" (mit winningTeam getaggten) Rallys chronologisch ab, optional gefiltert auf
+// einen Satz und/oder die letzten N Rallys — Basis für Sideout/Break, Rotationstabelle, Verlauf.
+function computeRallyLog(match, opts={}){
+  let log = [];
+  match.sets.forEach(set=>{
+    if(opts.setNumber!=null && set.setNumber!==opts.setNumber) return;
+    set.rallies.forEach(rally=>{
+      if(rally.winningTeam===undefined) return; // alte Rally ohne die neuen Felder
+      log.push(rally);
+    });
+  });
+  if(opts.lastN!=null) log = log.slice(-opts.lastN);
+  return log;
+}
+
+// Team-Kennzahlen: Sideout %, Break %, Angriff/Block/Aufschlag-Summen + Effizienz, Fehlerzahlen,
+// Punkteverteilung. Sideout%/Break% kommen aus dem Rally-Log (brauchen startServingTeam), die
+// übrigen aus computeStats() mit denselben Filtern (opts wird 1:1 durchgereicht).
+//   Sideout % = gewonnene Rallys, in denen das Team NICHT aufgeschlagen hat / alle solchen Rallys
+//   Break %   = gewonnene Rallys, in denen das Team SELBST aufgeschlagen hat / alle solchen Rallys
+function computeTeamAnalytics(match, opts={}){
+  const log = computeRallyLog(match, opts);
+  const stats = computeStats(match, opts);
+  const result = {};
+  ['home','away'].forEach(team=>{
+    let sideoutWon=0, sideoutTotal=0, breakWon=0, breakTotal=0;
+    const distribution = {};
+    log.forEach(rally=>{
+      const receiving = rally.startServingTeam!==team;
+      if(receiving){ sideoutTotal++; if(rally.winningTeam===team) sideoutWon++; }
+      else { breakTotal++; if(rally.winningTeam===team) breakWon++; }
+      if(rally.winningTeam===team){
+        const pt = pointTypeOf(rally);
+        distribution[pt.category] = (distribution[pt.category]||0)+1;
+      }
+    });
+
+    let attackPts=0, attackErr=0, attackAtt=0, aces=0, serveErr=0, blockPts=0, receptionErr=0, blockedAgainst=0;
+    Object.values(stats[team]).forEach(p=>{
+      const a=p.bySkill.A, s=p.bySkill.S, b=p.bySkill.B, r=p.bySkill.R;
+      if(a){ attackPts+=a.perfect; attackErr+=a.error; attackAtt+=a.total; }
+      if(s){ aces+=s.perfect; serveErr+=s.error; }
+      if(b){ blockPts+=b.perfect; }
+      if(r){ receptionErr+=r.error; }
+      blockedAgainst += p.blockedAgainst||0;
+    });
+    attackAtt += blockedAgainst;
+
+    // Team-Gesamtfehlerzahl direkt aus dem rohen Aktionslog (nicht aus den Spieler-Summen), damit
+    // eine übersprungene optionale Spieler-Zuordnung (siehe fieldQuickOpponentErrorSection /
+    // fieldQuickBlockSection) die TEAM-Zahl nicht verfälscht — die Person kann fehlen, der Fehler
+    // selbst ist trotzdem gezählt.
+    let totalErrors=0;
+    log.forEach(rally=>{
+      rally.actions.forEach(a=>{
+        if(a.skill==='OE'){ if(a.team!==team) totalErrors++; }
+        else if(a.code==='=' && a.team===team) totalErrors++;
+      });
+    });
+
+    result[team] = {
+      sideoutPct: sideoutTotal? Math.round(sideoutWon/sideoutTotal*100) : null, sideoutWon, sideoutTotal,
+      breakPct: breakTotal? Math.round(breakWon/breakTotal*100) : null, breakWon, breakTotal,
+      attackPts, attackErr, attackAtt, blockedAgainst,
+      attackEff: attackAtt? Math.round((attackPts-attackErr-blockedAgainst)/attackAtt*100) : null,
+      aces, serveErr, blockPts, receptionErr, totalErrors,
+      distribution,
+    };
+  });
+  return result;
+}
+
+// Rotationstabelle 1–6 für ein Team: gewonnene/verlorene Punkte, Differenz, Sideout%/Break%,
+// Rallyanzahl — jeweils bezogen auf die Aufstellung, die das Team WÄHREND der jeweiligen Rally
+// hatte (rally.homeRotation/awayRotation), nicht auf die aktuelle.
+function computeRotationTable(match, team, opts={}){
+  const log = computeRallyLog(match, opts);
+  const table = {};
+  for(let i=1;i<=6;i++) table[i] = {won:0, lost:0, rallies:0, sideoutWon:0, sideoutTotal:0, breakWon:0, breakTotal:0};
+  log.forEach(rally=>{
+    const set = match.sets.find(s=>s.setNumber===rally.setNumber);
+    if(!set || !set.startHomeLineup) return; // Satz von vor diesem Update, keine Start-Aufstellung bekannt
+    const startLineup = team==='home' ? set.startHomeLineup : set.startAwayLineup;
+    const rotSnapshot = team==='home' ? rally.homeRotation : rally.awayRotation;
+    const rot = rotationNumberOf(startLineup, rotSnapshot);
+    if(!rot) return;
+    const row = table[rot];
+    row.rallies++;
+    if(rally.winningTeam===team) row.won++; else row.lost++;
+    const receiving = rally.startServingTeam!==team;
+    if(receiving){ row.sideoutTotal++; if(rally.winningTeam===team) row.sideoutWon++; }
+    else { row.breakTotal++; if(rally.winningTeam===team) row.breakWon++; }
+  });
+  Object.values(table).forEach(row=>{
+    row.diff = row.won - row.lost;
+    row.sideoutPct = row.sideoutTotal? Math.round(row.sideoutWon/row.sideoutTotal*100) : null;
+    row.breakPct = row.breakTotal? Math.round(row.breakWon/row.breakTotal*100) : null;
+  });
+  return table;
+}
+
+// W/L-Verlauf (aus unserer/"home"-Sicht) — für die kompakte "Letzte Rallys"-Anzeige und um Momentum
+// auf einen Blick erkennbar zu machen.
+function computeWinLossHistory(match, opts={}){
+  return computeRallyLog(match, opts).map(rally=> rally.winningTeam==='home' ? 'W' : 'L');
 }
 
 // Alle Richtungslinien eines Teams zusammen (unabhängig vom einzelnen Spieler), gefiltert auf
@@ -1402,8 +1582,109 @@ function renderStats(header, main){
   }
   main.appendChild(summary);
 
+  renderTeamAnalytics(main, match);
+  renderRotationTable(main, match, 'home');
   renderStatTables(main, match);
   renderDirections(main, match);
+}
+
+// Kompakter W/L-Verlauf der letzten Rallys (aus unserer Sicht), auf einen Blick erkennbares
+// Momentum. Klick auf eine Rally klappt ihre Details darunter ein/aus (kein Popup).
+function renderRallyHistoryStrip(main, match){
+  const log = computeRallyLog(match, {lastN:12});
+  if(log.length===0) return;
+  const card = el('div',{class:'card'});
+  card.appendChild(el('h2',{},'Letzte Rallys'));
+  const row = el('div',{style:'display:flex;gap:4px;flex-wrap:wrap;'});
+  log.forEach(rally=>{
+    const win = rally.winningTeam==='home';
+    const isOpen = expandedRally && expandedRally.matchId===match.id && expandedRally.rally===rally;
+    const b = el('button',{
+      class:'btn '+(win?'':'secondary'),
+      style:'flex:0 0 auto;width:34px;height:34px;padding:0;font-weight:800;'+(win?'':'opacity:0.75;')+(isOpen?'outline:2px solid var(--accent);':''),
+      onclick:()=>{ expandedRally = isOpen ? null : {matchId:match.id, rally}; render(); }
+    }, win?'W':'L');
+    row.appendChild(b);
+  });
+  card.appendChild(row);
+
+  if(expandedRally && expandedRally.matchId===match.id && log.includes(expandedRally.rally)){
+    const rally = expandedRally.rally;
+    const pt = pointTypeOf(rally);
+    const win = rally.winningTeam==='home';
+    const winnerName = win ? state.teamName : match.opponentName;
+    const scoreAfterHome = rally.homeScoreBefore + (win?1:0);
+    const scoreAfterAway = rally.awayScoreBefore + (win?0:1);
+    const detail = el('div',{style:'margin-top:10px;padding-top:10px;border-top:1px solid var(--line);font-size:13px;'});
+    detail.appendChild(el('div',{},[el('strong',{},'Satz '+rally.setNumber+' · '+winnerName+' punktet'), ' — '+pt.category]));
+    detail.appendChild(el('div',{style:'color:var(--muted);margin-top:4px;'}, rally.homeScoreBefore+':'+rally.awayScoreBefore+' → '+scoreAfterHome+':'+scoreAfterAway));
+    card.appendChild(detail);
+  }
+  main.appendChild(card);
+}
+
+// Team-Kennzahlen: Sideout %, Break %, Angriffseffizienz, Fehler, Punkteverteilung — für beide
+// Teams nebeneinander. Rundet keine Prozentwerte auf Nachkommastellen (siehe Grundprinzip: keine
+// unnötigen Dezimalstellen), zeigt "–" statt 0/0, wenn es noch keine passende Situation gab.
+function renderTeamAnalytics(main, match){
+  const a = computeTeamAnalytics(match);
+  const card = el('div',{class:'card'});
+  card.appendChild(el('h2',{},'📈 Team-Kennzahlen'));
+  const wrap = el('div',{style:'display:flex;gap:14px;flex-wrap:wrap;'});
+  ['home','away'].forEach(team=>{
+    const t = a[team];
+    const box = el('div',{style:'flex:1;min-width:220px;'});
+    box.appendChild(el('div',{style:'font-weight:700;margin-bottom:6px;'}, team==='home'?state.teamName:match.opponentName));
+    const line = (label,val)=> el('div',{style:'display:flex;justify-content:space-between;font-size:13px;padding:3px 0;border-bottom:1px solid var(--line);'},[
+      el('span',{style:'color:var(--muted)'},label), el('span',{style:'font-weight:700'},val)
+    ]);
+    box.appendChild(line('Sideout %', t.sideoutPct==null?'–':t.sideoutPct+'% ('+t.sideoutWon+'/'+t.sideoutTotal+')'));
+    box.appendChild(line('Break %', t.breakPct==null?'–':t.breakPct+'% ('+t.breakWon+'/'+t.breakTotal+')'));
+    box.appendChild(line('Angriffseffizienz', t.attackEff==null?'–':t.attackEff+'% ('+t.attackPts+'/'+t.attackAtt+')'));
+    box.appendChild(line('Aufschlag-Asse', String(t.aces)));
+    box.appendChild(line('Aufschlagfehler', String(t.serveErr)));
+    box.appendChild(line('Blockpunkte', String(t.blockPts)));
+    box.appendChild(line('Angriffsfehler', String(t.attackErr)));
+    box.appendChild(line('Annahmefehler', String(t.receptionErr)));
+    box.appendChild(line('Fehler gesamt', String(t.totalErrors)));
+    const distEntries = Object.entries(t.distribution).sort((x,y)=>y[1]-x[1]);
+    if(distEntries.length){
+      box.appendChild(el('div',{style:'font-size:12px;color:var(--muted);margin-top:8px;'},'Punkteverteilung'));
+      distEntries.forEach(([cat,n])=> box.appendChild(el('div',{style:'font-size:12px;display:flex;justify-content:space-between;'},[el('span',{},cat), el('span',{},String(n))])));
+    }
+    wrap.appendChild(box);
+  });
+  card.appendChild(wrap);
+  card.appendChild(el('div',{style:'color:var(--muted);font-size:11px;margin-top:10px;'},'Sideout % = gewonnene Rallys ohne eigenen Aufschlag / alle solchen Rallys. Break % = gewonnene Rallys mit eigenem Aufschlag / alle solchen Rallys. Basiert nur auf Rallys, die nach dem Rotations-Update erfasst wurden.'));
+  main.appendChild(card);
+}
+
+// Rotationstabelle 1–6 für ein Team — zeigt, welche Rotation aktuell funktioniert und welche nicht.
+function renderRotationTable(main, match, team){
+  const table = computeRotationTable(match, team);
+  const hasAny = Object.values(table).some(r=>r.rallies>0);
+  if(!hasAny) return; // z.B. ganz frisches Spiel oder nur alte Rallys ohne Rotations-Daten
+  const card = el('div',{class:'card'});
+  card.appendChild(el('h2',{},'🔄 Rotation · '+(team==='home'?state.teamName:match.opponentName)));
+  const tbl = el('table',{style:'width:100%;border-collapse:collapse;font-size:13px;'});
+  tbl.appendChild(el('tr',{},[
+    el('th',{style:thStyle()},'Rot.'), el('th',{style:thStyle()},'Gew.'), el('th',{style:thStyle()},'Verl.'),
+    el('th',{style:thStyle()},'+/-'), el('th',{style:thStyle()},'Sideout'), el('th',{style:thStyle()},'Break')
+  ]));
+  for(let i=1;i<=6;i++){
+    const r = table[i];
+    const diffColor = r.diff>0 ? 'var(--home)' : (r.diff<0 ? 'var(--away)' : 'inherit');
+    tbl.appendChild(el('tr',{},[
+      el('td',{style:tdStyle()}, String(i)),
+      el('td',{style:tdStyle()}, String(r.won)),
+      el('td',{style:tdStyle()}, String(r.lost)),
+      el('td',{style:tdStyle()+'font-weight:800;color:'+diffColor}, (r.diff>0?'+':'')+r.diff),
+      el('td',{style:tdStyle()}, r.sideoutTotal? r.sideoutPct+'%' : '–'),
+      el('td',{style:tdStyle()}, r.breakTotal? r.breakPct+'%' : '–'),
+    ]));
+  }
+  card.appendChild(tbl);
+  main.appendChild(card);
 }
 
 // Statistik-Tabellen pro Team — wird sowohl auf der eigenen Statistik-Seite als auch
