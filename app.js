@@ -92,6 +92,11 @@ let banner = null;
 // PHASE 6: Zuspieler-Auswahl-Dialog (Coach Live) — {selectedId} solange offen, sonst null. Nur ein
 // Klick auf "Als Zuspieler festlegen" übernimmt die Auswahl, siehe renderCoachLive().
 let zuspielerModal = null;
+// UX-Kompaktierung: die "📊 Statistik (live)"-Blöcke auf der Live-Seite (Rally-Verlauf,
+// Team-Kennzahlen, Rotationstabelle, Spieler-Statistik, Richtungsdiagramme) sind nicht bei jedem
+// einzelnen Punkt nötig und machen die Seite sonst sehr lang — daher standardmäßig zugeklappt,
+// per Klick aufklappbar. Bewusst NICHT persistiert (setzt sich bei Seitenwechsel zurück), analog zu tagging/subbing.
+let liveStatsExpanded = false;
 
 function uid(){ return Math.random().toString(36).slice(2,10)+Date.now().toString(36); }
 
@@ -213,7 +218,11 @@ const ZONE_MARGIN = 22;
 //       onTapTarget(x,y), previewFrom{x,y}, previewTo{x,y}, previewColor
 function buildCourt(set, match, opts={}){
   const vx = -ZONE_MARGIN, vy = -ZONE_MARGIN, vw = 100+2*ZONE_MARGIN, vh = 130+2*ZONE_MARGIN;
-  const svg = svgEl('svg', {viewBox:`${vx} ${vy} ${vw} ${vh}`, style:'width:100%;height:auto;display:block;background:#1e293b;border-radius:10px;touch-action:none;'});
+  // Bewusst KEINE width/height-Attribute und KEIN width/height als Inline-Style: die tatsächliche
+  // Größe (inkl. der Sonderregel für sehr knappe Querformat-Bildschirme, siehe .field-court svg in
+  // index.html) kommt komplett aus dem Stylesheet, das per CSS-Rechnung (min()/aspect-ratio) eine
+  // eindeutige, nie "verzerrt" oder mit leerem Rand ("Letterboxing") gerenderte Größe erzwingt.
+  const svg = svgEl('svg', {viewBox:`${vx} ${vy} ${vw} ${vh}`, style:'display:block;background:#1e293b;border-radius:10px;touch-action:none;'});
   // Freizone (Bereich außerhalb der Spielfeldlinien, in dem z.B. der Aufschlag ausgeführt wird)
   svg.appendChild(svgEl('rect',{x:vx,y:vy,width:vw,height:vh, fill:'#24324a'}));
   // eigentliches Spielfeld
@@ -270,6 +279,29 @@ function buildCourt(set, match, opts={}){
     });
   });
   return svg;
+}
+
+// Spielfeld (SVG) + die direkt dazugehörigen Aktions-Buttons als ein Baustein: auf schmalen
+// Hochformat-Bildschirmen stehen sie (wie bisher) untereinander, ab Tablet-Breite bzw. im
+// Querformat nebeneinander (siehe .field-row in index.html) — das Feld bleibt dabei immer der
+// große, dominante Teil, die Buttons stehen als schmale Spalte drumherum.
+// opts.grid2col: kompakte 2-Spalten-Anordnung für kurze Buttons (z.B. die 5 Schnell-Aktionen).
+// opts.overlay: für Auswahllisten, die mehr Platz brauchen als die schmale Spalte hergibt (Art-/
+// Bewertungsauswahl, Spielerlisten) — legt sich ab Tablet-Breite als Panel ÜBER einen Teil des
+// Feldes, statt das Feld dafür zu verkleinern (auf schmalen Handy-Bildschirmen bleibt es einfach
+// unterhalb des Feldes, wie gehabt).
+function fieldRow(courtSvg, actionEls, opts={}){
+  const court = el('div',{class:'field-court'},[courtSvg]);
+  const items = actionEls.filter(Boolean);
+  // Solange es nichts zur Auswahl gibt (z.B. während im Feld noch getippt werden muss), auch keinen
+  // (Overlay-)Rahmen dafür rendern — sonst könnte selbst ein leeres Panel unnötig einen Teil des
+  // Feldes verdecken.
+  if(items.length===0) return el('div',{class:'field-row'},[court]);
+  let cls = 'field-actions';
+  if(opts.grid2col) cls += ' grid2col';
+  if(opts.overlay) cls += ' overlay';
+  const actions = el('div',{class:cls}, items);
+  return el('div',{class:'field-row'},[court, actions]);
 }
 
 function go(r){
@@ -720,12 +752,16 @@ function renderLive(header, main){
   }
   main.appendChild(board);
 
-  // Wechsel: eine Spielerin/ein Spieler auf einer Position gegen jemanden von der Bank tauschen.
-  substitutionSection(main, match, set);
-
-  // Spielfeld: zeigt die Aufstellung UND dient direkt zum Erfassen einer Aktion —
-  // kein separates/extra Feld mehr, alles läuft in dieser einen Karte.
+  // Spielfeld: zeigt die Aufstellung UND dient direkt zum Erfassen einer Aktion — kein separates/
+  // extra Feld mehr, alles läuft in dieser einen Karte. Bewusst DIREKT nach dem Spielstand (statt
+  // erst nach dem seltener genutzten Wechsel-Bereich), damit die bei jedem Punkt gebrauchten
+  // Buttons ohne zusätzliches Scrollen erreichbar sind.
   fieldSection(main, match, set);
+
+  // Wechsel: eine Spielerin/ein Spieler auf einer Position gegen jemanden von der Bank tauschen.
+  // Startet zugeklappt (nur der "🔄 Wechsel"-Button) — braucht dadurch kaum Platz, solange gerade
+  // kein Wechsel läuft.
+  substitutionSection(main, match, set);
 
   // Fehler-Erfassung: erscheint erst NACHDEM ein Punkt (egal ob per Feld-Tagging oder manuell)
   // erfasst wurde — dann optional Spieler(innen) des Teams, das den Punkt verloren hat, plus
@@ -753,14 +789,21 @@ function renderLive(header, main){
   // Fehler-Notizen (Verlauf der gesendeten Kommentare aus der Fehler-Erfassung oben).
   errorNotesSection(main, match);
 
-  // Statistik & Diagramme sind während des ganzen Spiels/Satzes durchgehend sichtbar,
-  // nicht nur über die separate Statistik-Seite.
-  main.appendChild(el('div',{style:'font-weight:800;font-size:15px;margin:18px 4px 4px;color:var(--muted);'},'📊 Statistik (live)'));
-  renderRallyHistoryStrip(main, match);
-  renderTeamAnalytics(main, match);
-  renderRotationTable(main, match, 'home');
-  renderStatTables(main, match);
-  renderDirections(main, match);
+  // Statistik & Diagramme bleiben während des ganzen Spiels/Satzes erreichbar (nicht nur über die
+  // separate Statistik-Seite), stehen aber standardmäßig zugeklappt — sie werden nicht bei jedem
+  // einzelnen Punkt gebraucht und würden die Seite sonst stark in die Länge ziehen (mehr Scrollen).
+  const statsToggleRow = el('div',{style:'display:flex;justify-content:space-between;align-items:center;margin:18px 4px 4px;'},[
+    el('div',{style:'font-weight:800;font-size:15px;color:var(--muted);'},'📊 Statistik (live)'),
+    el('button',{class:'btn secondary btn-sm', onclick:()=>{ liveStatsExpanded = !liveStatsExpanded; render(); }}, liveStatsExpanded ? 'Einklappen ▲' : 'Anzeigen ▼'),
+  ]);
+  main.appendChild(statsToggleRow);
+  if(liveStatsExpanded){
+    renderRallyHistoryStrip(main, match);
+    renderTeamAnalytics(main, match);
+    renderRotationTable(main, match, 'home');
+    renderStatTables(main, match);
+    renderDirections(main, match);
+  }
 
   const endCard = el('div',{class:'card'});
   endCard.appendChild(el('button',{class:'btn ghost block', onclick:()=>{
@@ -781,18 +824,17 @@ function fieldSection(main, match, set){
     // Gegner-Fehler IST bereits ein Punkt — keine Bewertungsskala mehr nötig, stattdessen wird
     // danach nur noch die Art der Aktion gewählt.
     fieldCard.appendChild(el('div',{style:'color:var(--muted);font-size:12px;margin-bottom:8px;'}, 'Ein Klick (außer +) ist direkt ein Punkt für das jeweilige Team.'));
-    fieldCard.appendChild(buildCourt(set, match, {}));
-    const grid = el('div',{class:'row', style:'margin-top:10px;'});
-    grid.appendChild(el('button',{class:'btn secondary', style:'flex:1 1 45%;', onclick:()=>{ tagging = {quick:'A', team:null, playerId:'', fromPoint:null, toPoint:null}; render(); }}, 'Angriff'));
-    grid.appendChild(el('button',{class:'btn secondary', style:'flex:1 1 45%;', onclick:()=>{ tagging = {quick:'B', team:null, playerIds:[]}; render(); }}, 'Block'));
-    grid.appendChild(el('button',{class:'btn secondary', style:'flex:1 1 45%;', onclick:()=>{ tagging = {quick:'S', team:null, playerId:'', fromPoint:null, toPoint:null}; render(); }}, 'Aufschlag'));
-    grid.appendChild(el('button',{class:'btn secondary', style:'flex:1 1 45%;', onclick:()=>{ tagging = {quick:'OE', team:null}; render(); }}, 'Gegner-Fehler'));
+    const grid = el('div',{class:'row field-quickgrid'});
+    grid.appendChild(el('button',{class:'btn secondary btn-sm', style:'flex:1 1 45%;', onclick:()=>{ tagging = {quick:'A', team:null, playerId:'', fromPoint:null, toPoint:null}; render(); }}, 'Angriff'));
+    grid.appendChild(el('button',{class:'btn secondary btn-sm', style:'flex:1 1 45%;', onclick:()=>{ tagging = {quick:'B', team:null, playerIds:[]}; render(); }}, 'Block'));
+    grid.appendChild(el('button',{class:'btn secondary btn-sm', style:'flex:1 1 45%;', onclick:()=>{ tagging = {quick:'S', team:null, playerId:'', fromPoint:null, toPoint:null}; render(); }}, 'Aufschlag'));
+    grid.appendChild(el('button',{class:'btn secondary btn-sm', style:'flex:1 1 45%;', onclick:()=>{ tagging = {quick:'OE', team:null}; render(); }}, 'Gegner-Fehler'));
     // PHASE 8: schnelle Annahme-Erfassung — Spieler + Qualität, direkt neben den anderen Schnell-
     // Buttons (statt nur versteckt in der ausführlichen "+"-Erfassung). Beendet KEINE Rally/keinen
     // Punkt, die ausführliche Erfassung über "+" bleibt vollständig unverändert erhalten.
-    grid.appendChild(el('button',{class:'btn secondary', style:'flex:1 1 45%;', onclick:()=>{ tagging = {quick:'R', team:null, playerId:''}; render(); }}, 'Annahme'));
-    fieldCard.appendChild(grid);
-    fieldCard.appendChild(el('button',{class:'btn ghost block', style:'margin-top:8px;', onclick:()=>{ tagging = {legacy:true, skillCode:null, team:null, playerId:'', fromPoint:null, toPoint:null}; render(); }}, '+ weitere Aktion (ausführlich, mit Bewertung)'));
+    grid.appendChild(el('button',{class:'btn secondary btn-sm', style:'flex:1 1 45%;', onclick:()=>{ tagging = {quick:'R', team:null, playerId:''}; render(); }}, 'Annahme'));
+    fieldCard.appendChild(fieldRow(buildCourt(set, match, {}), [grid], {grid2col:true}));
+    fieldCard.appendChild(el('button',{class:'btn ghost block btn-sm', style:'margin-top:8px;', onclick:()=>{ tagging = {legacy:true, skillCode:null, team:null, playerId:'', fromPoint:null, toPoint:null}; render(); }}, '+ weitere Aktion (ausführlich, mit Bewertung)'));
   } else if(tagging.legacy){
     fieldLegacySection(fieldCard, match, set);
   } else if(tagging.quick==='OE'){
@@ -814,13 +856,12 @@ function fieldSection(main, match, set){
 function fieldLegacySection(fieldCard, match, set){
   if(!tagging.skillCode){
     fieldCard.appendChild(el('div',{style:'color:var(--muted);font-size:12px;margin-bottom:8px;'}, 'Weitere Aktion — ausführliche Erfassung mit Bewertung (perfekt/gut/neutral/schwach/Fehler).'));
-    fieldCard.appendChild(buildCourt(set, match, {}));
-    const skillGrid = el('div',{class:'row', style:'margin-top:10px;'});
+    const skillGrid = el('div',{class:'row'});
     SKILLS.forEach(sk=>{
-      skillGrid.appendChild(el('button',{class:'btn secondary', style:'flex:1 1 30%;', onclick:()=>{ tagging.skillCode = sk.code; render(); }}, sk.label));
+      skillGrid.appendChild(el('button',{class:'btn secondary btn-sm', style:'flex:1 1 30%;', onclick:()=>{ tagging.skillCode = sk.code; render(); }}, sk.label));
     });
-    fieldCard.appendChild(skillGrid);
-    fieldCard.appendChild(el('button',{class:'btn ghost block', style:'margin-top:10px', onclick:()=>{ tagging=null; render(); }},'Abbrechen'));
+    fieldCard.appendChild(fieldRow(buildCourt(set, match, {}), [skillGrid], {grid2col:true}));
+    fieldCard.appendChild(el('button',{class:'btn ghost block btn-sm', style:'margin-top:10px', onclick:()=>{ tagging=null; render(); }},'Abbrechen'));
     return;
   }
 
@@ -837,7 +878,7 @@ function fieldLegacySection(fieldCard, match, set){
   else hintText = 'Bewertung wählen.';
   fieldCard.appendChild(el('div',{style:'color:var(--accent);font-weight:600;font-size:13px;margin-bottom:8px;'}, skill.label+' erfassen: '+hintText));
 
-  fieldCard.appendChild(buildCourt(set, match, {
+  const courtSvg = buildCourt(set, match, {
     selectableTeam: fixedTeam || 'both',
     onSelectPlayer: (team,pid)=>{ tagging.team=team; tagging.playerId=pid; tagging.fromPoint=null; tagging.toPoint=null; render(); },
     selectedPlayerId: tagging.playerId,
@@ -848,25 +889,36 @@ function fieldLegacySection(fieldCard, match, set){
     previewFrom: needsTarget ? tagging.fromPoint : null,
     previewTo: needsTarget ? tagging.toPoint : null,
     previewColor: '#facc15'
-  }));
-
-  if(needsTarget && tagging.playerId && (tagging.fromPoint || tagging.toPoint)){
-    fieldCard.appendChild(el('button',{class:'btn ghost block', style:'margin-top:6px;font-size:12px;', onclick:()=>{ tagging.fromPoint=null; tagging.toPoint=null; render(); }},'↺ Start-/Zielposition neu setzen'));
-  }
-
-  const evalRow = el('div',{class:'row eval-row', style:'margin-top:10px;'});
-  EVALS.forEach(ev=>{
-    evalRow.appendChild(el('button',{class:'btn secondary '+ev.cls, style:'flex:1 1 18%;', onclick:()=>{
-      if(!tagging.playerId){ alert('Bitte zuerst im Feld auf einen Spieler tippen.'); return; }
-      if(needsTarget && (!tagging.fromPoint || !tagging.toPoint)){ alert('Bitte Start- und Zielposition im Feld antippen.'); return; }
-      const t = tagging;
-      tagging = null;
-      logAction(match, t.skillCode, t.team, t.playerId, ev.code, t.fromPoint, t.toPoint);
-    }}, ev.code+' '+ev.label));
   });
-  fieldCard.appendChild(el('label',{},'Bewertung'));
-  fieldCard.appendChild(evalRow);
-  fieldCard.appendChild(el('button',{class:'btn ghost block', style:'margin-top:10px', onclick:()=>{ tagging=null; render(); }},'Abbrechen'));
+
+  // Der "Position neu setzen"-Button bleibt bewusst AUSSERHALB der Auswahl-Fläche (nicht im Overlay)
+  // — er kann nötig sein, während noch weiter im Feld getippt wird, und darf deshalb nie einen Teil
+  // des Feldes verdecken, den der/die Trainer:in als Nächstes antippen will.
+  const resetBtn = (needsTarget && tagging.playerId && (tagging.fromPoint || tagging.toPoint))
+    ? el('button',{class:'btn ghost btn-sm block', style:'margin-top:8px;font-size:12px;', onclick:()=>{ tagging.fromPoint=null; tagging.toPoint=null; render(); }},'↺ Start-/Zielposition neu setzen')
+    : null;
+
+  // Die Bewertungsauswahl selbst erscheint erst, wenn im Feld nichts mehr angetippt werden muss
+  // (Spieler + ggf. Start/Ziel stehen fest) — deshalb ist es hier unproblematisch, sie als Overlay
+  // über einen Teil des (dann großen) Feldes zu legen: es wird ja nicht mehr weiter dort getippt.
+  const actionEls = [];
+  if(canEval){
+    const evalRow = el('div',{class:'row eval-row'});
+    EVALS.forEach(ev=>{
+      evalRow.appendChild(el('button',{class:'btn secondary btn-sm '+ev.cls, style:'flex:1 1 18%;', onclick:()=>{
+        if(!tagging.playerId){ alert('Bitte zuerst im Feld auf einen Spieler tippen.'); return; }
+        if(needsTarget && (!tagging.fromPoint || !tagging.toPoint)){ alert('Bitte Start- und Zielposition im Feld antippen.'); return; }
+        const t = tagging;
+        tagging = null;
+        logAction(match, t.skillCode, t.team, t.playerId, ev.code, t.fromPoint, t.toPoint);
+      }}, ev.code+' '+ev.label));
+    });
+    actionEls.push(el('label',{},'Bewertung'));
+    actionEls.push(evalRow);
+  }
+  fieldCard.appendChild(fieldRow(courtSvg, actionEls, {overlay:true}));
+  if(resetBtn) fieldCard.appendChild(resetBtn);
+  fieldCard.appendChild(el('button',{class:'btn ghost block btn-sm', style:'margin-top:10px', onclick:()=>{ tagging=null; render(); }},'Abbrechen'));
 }
 
 // Schnellerfassung Angriff/Aufschlag: Spieler + Start-/Zielposition (für die Richtungsdiagramme)
@@ -885,7 +937,7 @@ function fieldQuickAttackServeSection(fieldCard, match, set){
   else hintText = 'Art wählen — das ist direkt der Punkt.';
   fieldCard.appendChild(el('div',{style:'color:var(--accent);font-weight:600;font-size:13px;margin-bottom:8px;'}, label+' erfassen: '+hintText));
 
-  fieldCard.appendChild(buildCourt(set, match, {
+  const courtSvg = buildCourt(set, match, {
     selectableTeam: fixedTeam || 'both',
     onSelectPlayer: (team,pid)=>{ tagging.team=team; tagging.playerId=pid; tagging.fromPoint=null; tagging.toPoint=null; render(); },
     selectedPlayerId: tagging.playerId,
@@ -896,25 +948,33 @@ function fieldQuickAttackServeSection(fieldCard, match, set){
     previewFrom: tagging.fromPoint,
     previewTo: tagging.toPoint,
     previewColor: '#facc15'
-  }));
+  });
 
-  if(tagging.playerId && (tagging.fromPoint || tagging.toPoint)){
-    fieldCard.appendChild(el('button',{class:'btn ghost block', style:'margin-top:6px;font-size:12px;', onclick:()=>{ tagging.fromPoint=null; tagging.toPoint=null; render(); }},'↺ Start-/Zielposition neu setzen'));
-  }
+  // Der "Position neu setzen"-Button bleibt bewusst AUSSERHALB der Auswahl-Fläche (nicht im Overlay)
+  // — er kann nötig sein, während noch weiter im Feld getippt wird (Ziel fehlt noch), und darf
+  // deshalb nie einen Teil des Feldes verdecken, den man als Nächstes antippen will.
+  const resetBtn = (tagging.playerId && (tagging.fromPoint || tagging.toPoint))
+    ? el('button',{class:'btn ghost btn-sm block', style:'margin-top:8px;font-size:12px;', onclick:()=>{ tagging.fromPoint=null; tagging.toPoint=null; render(); }},'↺ Start-/Zielposition neu setzen')
+    : null;
 
+  // Die Art-Auswahl selbst erscheint erst, wenn Spieler + Start/Ziel bereits feststehen — im Feld
+  // muss dann nichts mehr angetippt werden, ein Overlay über einen Teil davon ist unproblematisch.
+  const actionEls = [];
   if(canPickType){
-    fieldCard.appendChild(el('label',{style:'margin-top:8px;'},'Art des '+label+'s'));
+    actionEls.push(el('label',{},'Art des '+label+'s'));
     const grid = el('div',{class:'row'});
     types.forEach(type=>{
-      grid.appendChild(el('button',{class:'btn secondary', style:'flex:1 1 45%;', onclick:()=>{
+      grid.appendChild(el('button',{class:'btn secondary btn-sm', style:'flex:1 1 45%;', onclick:()=>{
         const t = tagging;
         tagging = null;
         logQuickPoint(match, {skillCode:t.quick, team:t.team, playerId:t.playerId, type, fromPoint:t.fromPoint, toPoint:t.toPoint});
       }}, type));
     });
-    fieldCard.appendChild(grid);
+    actionEls.push(grid);
   }
-  fieldCard.appendChild(el('button',{class:'btn ghost block', style:'margin-top:10px', onclick:()=>{ tagging=null; render(); }},'Abbrechen'));
+  fieldCard.appendChild(fieldRow(courtSvg, actionEls, {overlay:true}));
+  if(resetBtn) fieldCard.appendChild(resetBtn);
+  fieldCard.appendChild(el('button',{class:'btn ghost block btn-sm', style:'margin-top:10px', onclick:()=>{ tagging=null; render(); }},'Abbrechen'));
 }
 
 // PHASE 8: Schnellerfassung Annahme — Spieler antippen, dann Qualität wählen (gleiche 5-stufige
@@ -928,25 +988,27 @@ function fieldQuickReceptionSection(fieldCard, match, set){
   const hintText = tagging.playerId ? 'Annahmequalität wählen.' : 'Auf den Spieler im Feld tippen, der angenommen hat.';
   fieldCard.appendChild(el('div',{style:'color:var(--accent);font-weight:600;font-size:13px;margin-bottom:8px;'}, 'Annahme erfassen: '+hintText));
 
-  fieldCard.appendChild(buildCourt(set, match, {
+  const courtSvg = buildCourt(set, match, {
     selectableTeam: fixedTeam,
     onSelectPlayer: (team,pid)=>{ tagging.team=team; tagging.playerId=pid; render(); },
     selectedPlayerId: tagging.playerId,
-  }));
+  });
 
+  const actionEls = [];
   if(tagging.playerId){
-    const evalRow = el('div',{class:'row eval-row', style:'margin-top:10px;'});
+    const evalRow = el('div',{class:'row eval-row'});
     EVALS.forEach(ev=>{
-      evalRow.appendChild(el('button',{class:'btn secondary '+ev.cls, style:'flex:1 1 18%;', onclick:()=>{
+      evalRow.appendChild(el('button',{class:'btn secondary btn-sm '+ev.cls, style:'flex:1 1 18%;', onclick:()=>{
         const t = tagging;
         tagging = null;
         logAction(match, 'R', t.team, t.playerId, ev.code, null, null);
       }}, ev.code+' '+ev.label));
     });
-    fieldCard.appendChild(el('label',{},'Annahmequalität'));
-    fieldCard.appendChild(evalRow);
+    actionEls.push(el('label',{},'Annahmequalität'));
+    actionEls.push(evalRow);
   }
-  fieldCard.appendChild(el('button',{class:'btn ghost block', style:'margin-top:10px', onclick:()=>{ tagging=null; render(); }},'Abbrechen'));
+  fieldCard.appendChild(fieldRow(courtSvg, actionEls, {overlay:true}));
+  fieldCard.appendChild(el('button',{class:'btn ghost block btn-sm', style:'margin-top:10px', onclick:()=>{ tagging=null; render(); }},'Abbrechen'));
 }
 
 // Schnellerfassung Block: bis zu 3 Spieler:innen DESSELBEN Teams antippen (Mehrfachblock),
@@ -962,14 +1024,14 @@ function fieldQuickBlockSection(fieldCard, match, set){
     fieldCard.appendChild(el('div',{style:'color:var(--muted);font-size:12px;margin-bottom:8px;'}, 'Optional: gegen wen ging der Block?'));
     const grid = el('div',{class:'row'});
     opponentRoster.forEach(p=>{
-      grid.appendChild(el('button',{class:'btn secondary', style:'flex:1 1 30%;', onclick:()=>{
+      grid.appendChild(el('button',{class:'btn secondary btn-sm', style:'flex:1 1 30%;', onclick:()=>{
         const t = tagging;
         tagging = null;
         logQuickPoint(match, {skillCode:'B', team:t.team, playerIds:t.playerIds, type:t.type, blockedPlayerId:p.id, blockedTeam:opponentTeam});
       }}, '#'+p.number+(p.name?(' '+p.name):'')));
     });
     fieldCard.appendChild(grid);
-    fieldCard.appendChild(el('button',{class:'btn ghost block', style:'margin-top:10px', onclick:()=>{
+    fieldCard.appendChild(el('button',{class:'btn ghost block btn-sm', style:'margin-top:10px', onclick:()=>{
       const t = tagging;
       tagging = null;
       logQuickPoint(match, {skillCode:'B', team:t.team, playerIds:t.playerIds, type:t.type});
@@ -982,7 +1044,7 @@ function fieldQuickBlockSection(fieldCard, match, set){
     : ('Ausgewählt: '+tagging.playerIds.length+'/3 — weitere antippen (gleiches Team) oder Art wählen.');
   fieldCard.appendChild(el('div',{style:'color:var(--accent);font-weight:600;font-size:13px;margin-bottom:8px;'}, 'Block erfassen: '+hintText));
 
-  fieldCard.appendChild(buildCourt(set, match, {
+  const courtSvg = buildCourt(set, match, {
     selectableTeam: tagging.team || 'both',
     onSelectPlayer: (team,pid)=>{
       if(tagging.team && team!==tagging.team){ alert('Bitte nur Spieler:innen von einem Team auswählen.'); return; }
@@ -998,25 +1060,30 @@ function fieldQuickBlockSection(fieldCard, match, set){
       render();
     },
     selectedPlayerId: tagging.playerIds,
-  }));
+  });
 
+  const actionEls = [];
   if(tagging.playerIds.length>0){
-    const chips = el('div',{class:'row', style:'margin-top:6px;'});
+    const chips = el('div',{class:'row'});
     tagging.playerIds.forEach(pid=>{
       chips.appendChild(el('span',{class:'pill'}, playerName(tagging.team,pid,match)));
     });
-    fieldCard.appendChild(chips);
+    actionEls.push(chips);
   }
-
   if(tagging.playerIds.length>0){
-    fieldCard.appendChild(el('label',{style:'margin-top:8px;'},'Art des Blocks'));
+    actionEls.push(el('label',{},'Art des Blocks'));
     const grid = el('div',{class:'row'});
     BLOCK_TYPES.forEach(type=>{
-      grid.appendChild(el('button',{class:'btn secondary', style:'flex:1 1 45%;', onclick:()=>{ tagging.type = type; render(); }}, type));
+      grid.appendChild(el('button',{class:'btn secondary btn-sm', style:'flex:1 1 45%;', onclick:()=>{ tagging.type = type; render(); }}, type));
     });
-    fieldCard.appendChild(grid);
+    actionEls.push(grid);
   }
-  fieldCard.appendChild(el('button',{class:'btn ghost block', style:'margin-top:10px', onclick:()=>{ tagging=null; render(); }},'Abbrechen'));
+  // Bewusst OHNE Overlay: bis zu 3 Spieler:innen können nacheinander angetippt werden, solange die
+  // Art noch nicht gewählt ist — ein Overlay könnte dabei genau die Spielerkreise verdecken, die als
+  // Nächstes noch angetippt werden sollen. Die Auswahl bleibt daher eine schmale, aber immer
+  // sichtbare Spalte neben dem (weiterhin großen) Feld.
+  fieldCard.appendChild(fieldRow(courtSvg, actionEls));
+  fieldCard.appendChild(el('button',{class:'btn ghost block btn-sm', style:'margin-top:10px', onclick:()=>{ tagging=null; render(); }},'Abbrechen'));
 }
 
 // Schnellerfassung Gegner-Fehler: kein Spieler nötig — nur welches Team den Punkt bekommt,
@@ -1027,8 +1094,8 @@ function fieldQuickOpponentErrorSection(fieldCard, match){
   if(!tagging.team){
     fieldCard.appendChild(el('div',{style:'color:var(--muted);font-size:12px;margin-bottom:8px;'}, 'Welches Team bekommt den Punkt?'));
     const row = el('div',{class:'row'});
-    row.appendChild(el('button',{class:'btn secondary', style:'flex:1', onclick:()=>{ tagging.team='home'; render(); }}, state.teamName));
-    row.appendChild(el('button',{class:'btn secondary', style:'flex:1', onclick:()=>{ tagging.team='away'; render(); }}, match.opponentName));
+    row.appendChild(el('button',{class:'btn secondary btn-sm', style:'flex:1', onclick:()=>{ tagging.team='home'; render(); }}, state.teamName));
+    row.appendChild(el('button',{class:'btn secondary btn-sm', style:'flex:1', onclick:()=>{ tagging.team='away'; render(); }}, match.opponentName));
     fieldCard.appendChild(row);
   } else if(tagging.type){
     // Nur für Angriffsfehler erreichbar (siehe unten) — optionale Spieler-Zuordnung.
@@ -1037,14 +1104,14 @@ function fieldQuickOpponentErrorSection(fieldCard, match){
     fieldCard.appendChild(el('div',{style:'color:var(--muted);font-size:12px;margin-bottom:8px;'}, tagging.type+' — optional: wer hat den Fehler gemacht?'));
     const grid = el('div',{class:'row'});
     roster.forEach(p=>{
-      grid.appendChild(el('button',{class:'btn secondary', style:'flex:1 1 30%;', onclick:()=>{
+      grid.appendChild(el('button',{class:'btn secondary btn-sm', style:'flex:1 1 30%;', onclick:()=>{
         const t = tagging;
         tagging = null;
         logQuickPoint(match, {skillCode:'OE', team:t.team, type:t.type, errorPlayerId:p.id, errorTeam:erringTeam});
       }}, '#'+p.number+(p.name?(' '+p.name):'')));
     });
     fieldCard.appendChild(grid);
-    fieldCard.appendChild(el('button',{class:'btn ghost block', style:'margin-top:10px', onclick:()=>{
+    fieldCard.appendChild(el('button',{class:'btn ghost block btn-sm', style:'margin-top:10px', onclick:()=>{
       const t = tagging;
       tagging = null;
       logQuickPoint(match, {skillCode:'OE', team:t.team, type:t.type});
@@ -1054,7 +1121,7 @@ function fieldQuickOpponentErrorSection(fieldCard, match){
     fieldCard.appendChild(el('div',{style:'color:var(--muted);font-size:12px;margin-bottom:8px;'}, 'Fehlerart des Gegners wählen:'));
     const grid = el('div',{class:'row'});
     OPP_ERROR_TYPES.forEach(type=>{
-      grid.appendChild(el('button',{class:'btn secondary', style:'flex:1 1 45%;', onclick:()=>{
+      grid.appendChild(el('button',{class:'btn secondary btn-sm', style:'flex:1 1 45%;', onclick:()=>{
         if(OE_ATTACK_ERROR_TYPES.includes(type)){ tagging.type = type; render(); return; }
         const t = tagging;
         tagging = null;
@@ -1063,7 +1130,7 @@ function fieldQuickOpponentErrorSection(fieldCard, match){
     });
     fieldCard.appendChild(grid);
   }
-  fieldCard.appendChild(el('button',{class:'btn ghost block', style:'margin-top:10px', onclick:()=>{ tagging=null; render(); }},'Abbrechen'));
+  fieldCard.appendChild(el('button',{class:'btn ghost block btn-sm', style:'margin-top:10px', onclick:()=>{ tagging=null; render(); }},'Abbrechen'));
 }
 
 // Phase 5: Kompakter, rein deskriptiver Zahlenvergleich zweier Spieler:innen (z.B. im Wechsel-Dialog

@@ -26,19 +26,70 @@ html,body{height:100%;}
 body{margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; background:var(--bg); color:var(--text); overscroll-behavior:none;}
 button{font-family:inherit;}
 #app{max-width:900px; margin:0 auto; min-height:100vh; display:flex; flex-direction:column; padding-bottom:env(safe-area-inset-bottom);}
-header.topbar{position:sticky; top:0; z-index:20; background:rgba(15,23,42,.92); backdrop-filter:blur(8px); padding:12px 16px calc(12px + env(safe-area-inset-top)); padding-top:calc(12px + env(safe-area-inset-top)); display:flex; align-items:center; gap:10px; border-bottom:1px solid var(--line);}
-header.topbar h1{font-size:17px; margin:0; flex:1; font-weight:700; letter-spacing:.2px;}
-header.topbar .back{background:var(--card); border:1px solid var(--line); color:var(--text); border-radius:10px; padding:8px 12px; font-size:14px;}
-main{flex:1; padding:16px; padding-bottom:32px;}
-.card{background:var(--card); border:1px solid var(--line); border-radius:var(--radius); padding:16px; margin-bottom:14px;}
-.card h2{margin:0 0 10px; font-size:15px; color:var(--muted); text-transform:uppercase; letter-spacing:.6px;}
-.btn{display:inline-flex; align-items:center; justify-content:center; gap:8px; background:var(--accent); color:#fff; border:none; border-radius:12px; padding:13px 18px; font-size:15px; font-weight:600; cursor:pointer;}
+header.topbar{position:sticky; top:0; z-index:20; background:rgba(15,23,42,.92); backdrop-filter:blur(8px); padding:10px 16px calc(10px + env(safe-area-inset-top)); padding-top:calc(10px + env(safe-area-inset-top)); display:flex; align-items:center; gap:10px; border-bottom:1px solid var(--line);}
+header.topbar h1{font-size:16px; margin:0; flex:1; font-weight:700; letter-spacing:.2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0;}
+header.topbar .back{background:var(--card); border:1px solid var(--line); color:var(--text); border-radius:10px; padding:7px 11px; font-size:13px;}
+main{flex:1; padding:12px; padding-bottom:28px;}
+.card{background:var(--card); border:1px solid var(--line); border-radius:var(--radius); padding:12px; margin-bottom:10px; scroll-margin-top:100px;}
+.card h2{margin:0 0 8px; font-size:14px; color:var(--muted); text-transform:uppercase; letter-spacing:.6px;}
+.btn{display:inline-flex; align-items:center; justify-content:center; gap:6px; background:var(--accent); color:#fff; border:none; border-radius:11px; padding:11px 16px; font-size:14px; font-weight:600; cursor:pointer; line-height:1.25;}
 .btn.secondary{background:var(--card2); color:var(--text); border:1px solid var(--line);}
 .btn.ghost{background:transparent; color:var(--accent2); border:1px solid var(--line);}
 .btn.block{display:flex; width:100%;}
 .btn:disabled{opacity:.4;}
-.row{display:flex; gap:10px; flex-wrap:wrap;}
+/* Kompaktere Variante für die häufig getippten Aktions-/Auswahl-Buttons im Spielfeld (Schnelltags,
+   Art-/Bewertungs-Auswahl) — spart Platz, damit bei jedem Punkt weniger gescrollt werden muss. */
+.btn-sm{padding:8px 10px; font-size:12.5px; border-radius:9px; gap:4px;}
+.row{display:flex; gap:8px; flex-wrap:wrap;}
+.row.field-quickgrid{gap:7px;}
 .grid2{display:grid; grid-template-columns:1fr 1fr; gap:10px;}
+/* Spielfeld + zugehörige Aktions-Buttons: das Feld soll immer der große, dominante Teil sein — die
+   Buttons stehen als schmale Spalte drumherum, nicht als breite, leere Fläche. Auf schmalen
+   Hochformat-Bildschirmen (Handy) steht das (dann volle Breite nutzende) Feld über den Buttons, ab
+   Tablet-Breite bzw. im Querformat stehen sie nebeneinander. */
+.field-row{display:flex; flex-direction:column; gap:10px;}
+.field-court{width:100%; scroll-margin-top:100px;}
+.field-court svg{width:100%; height:auto; max-width:440px; margin:0 auto; scroll-margin-top:100px; display:block;}
+.field-actions{display:flex; flex-direction:column; gap:7px;}
+.field-actions.grid2col{display:grid; grid-template-columns:1fr 1fr; gap:7px;}
+@media (min-width:700px){
+  #app{max-width:1180px;}
+  .field-row{flex-direction:row; align-items:flex-start; position:relative;}
+  /* Feld bekommt den Großteil des Platzes ... */
+  .field-court{flex:1 1 auto; max-width:560px;}
+  .field-court svg{max-width:560px;}
+  /* ... die Buttons bleiben eine schmale Spalte daneben statt über die ganze Breite gedehnter Reihen. */
+  .field-actions{flex:0 0 190px; max-width:190px; justify-content:flex-start;}
+  .field-actions.grid2col{grid-template-columns:1fr 1fr;}
+  /* Sobald eine Auswahl (Art/Bewertung/Spielerliste o.ä.) mehr Platz braucht als die schmale Spalte
+     hergibt, legt sie sich stattdessen als Panel ÜBER einen Teil des Feldes — das Feld bleibt dabei
+     groß und sichtbar, es wird bewusst in Kauf genommen, dass ein Teil kurzzeitig verdeckt ist,
+     statt das ganze Layout wieder zusammenzuquetschen. */
+  .field-actions.overlay{
+    position:absolute; top:0; right:0; z-index:5;
+    width:min(300px, 52%); max-width:300px; flex:none;
+    background:rgba(20,29,48,.97); border:1px solid var(--line); border-radius:12px;
+    padding:12px; max-height:100%; overflow-y:auto;
+    box-shadow:0 10px 28px rgba(0,0,0,.45);
+  }
+}
+@media (orientation:landscape) and (max-height:520px){
+  /* Handy im Querformat: sehr wenig Höhe verfügbar — Kopfzeile/Karten zusätzlich verschlanken. Das
+     Spielfeld ist (im Hochformat-Seitenverhältnis) oft höher als hier überhaupt Platz ist, wenn es
+     nur nach Breite skaliert wird — deshalb hier zusätzlich per max-height begrenzen, damit es immer
+     KOMPLETT sichtbar (und antippbar) bleibt, statt unten aus dem Bildschirm zu laufen. */
+  header.topbar{padding-top:calc(6px + env(safe-area-inset-top)); padding-bottom:6px;}
+  main{padding:8px;}
+  .card{padding:9px; margin-bottom:8px;}
+  .card h2{font-size:12.5px; margin-bottom:6px;}
+  .field-court{max-width:340px;}
+  /* Die Breite wird direkt per min()/aspect-ratio als eindeutiger Pixelwert berechnet (statt über
+     mehrdeutiges width:auto + max-width + max-height gleichzeitig) — Feld-Seitenverhältnis ist
+     144:174 (≈0.8276). So passt die SVG-Box IMMER exakt zum gezeichneten Feld (kein leerer Rand /
+     "Letterboxing"), in dem Taps sonst ins Leere gehen könnten, und das Feld bleibt garantiert
+     komplett innerhalb der knappen Bildschirmhöhe sichtbar. */
+  .field-court svg{width:min(340px, 58vh * 0.827586); aspect-ratio:144/174; height:auto; max-width:none;}
+}
 input,select{width:100%; background:var(--bg2); border:1px solid var(--line); color:var(--text); border-radius:10px; padding:11px 12px; font-size:15px;}
 label{font-size:12px; color:var(--muted); display:block; margin-bottom:5px; margin-top:10px;}
 .list-item{display:flex; align-items:center; justify-content:space-between; gap:10px; background:var(--bg2); border-radius:10px; padding:10px 12px; margin-bottom:8px;}
