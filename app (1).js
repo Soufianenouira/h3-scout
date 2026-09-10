@@ -42,6 +42,7 @@ const OPP_ERROR_TYPES = ['Aufschlag ins Aus','Angriff ins Aus','Angriff ins Netz
 const OE_ATTACK_ERROR_TYPES = ['Angriff ins Aus','Angriff ins Netz'];
 
 const POSITIONS = [1,2,3,4,5,6]; // FIVB-Rotationspositionen
+const MAX_NORMAL_SUBS_PER_SET = 6; // FIVB-Regel: max. 6 reguläre Auswechslungen pro Team und Satz (Libero zählt nicht mit)
 
 // Richtungserfassung (wer schlägt wohin) — nur für Aufschlag und Angriff
 const ZONE_SKILLS = ['S','A'];
@@ -88,13 +89,22 @@ let expandedRally = null;
 // widerspricht dem Grundsatz "keine unnötigen Popups". Stattdessen ein nicht-blockierender Banner
 // oben auf der nächsten Seite (Live- oder Statistik-Ansicht), der bis zum Wegklicken sichtbar bleibt.
 let banner = null;
+// PHASE 6: Zuspieler-Auswahl-Dialog (Coach Live) — {selectedId} solange offen, sonst null. Nur ein
+// Klick auf "Als Zuspieler festlegen" übernimmt die Auswahl, siehe renderCoachLive().
+let zuspielerModal = null;
 
 function uid(){ return Math.random().toString(36).slice(2,10)+Date.now().toString(36); }
 
 function loadState(){
   try{
     const raw = localStorage.getItem(STORAGE_KEY);
-    if(raw) return JSON.parse(raw);
+    if(raw){
+      const parsed = JSON.parse(raw);
+      // Bestehende, ggf. ältere/unvollständige Spielstände sofort beim Laden reparieren (siehe
+      // repairMatch) — nie stillschweigend mit fehlenden Rotationsdaten weiterarbeiten.
+      (parsed.matches||[]).forEach(repairMatch);
+      return parsed;
+    }
   }catch(e){}
   return { teamName:'Eintracht Frankfurt H3', roster:[], matches:[] };
 }
@@ -103,7 +113,11 @@ function saveState(){
   try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }catch(e){}
 }
 
-function getMatch(id){ return state.matches.find(m=>m.id===id); }
+function getMatch(id){
+  const m = state.matches.find(m=>m.id===id);
+  if(m) repairMatch(m); // Verteidigungslinie #2: auch bei jedem Zugriff nochmal absichern.
+  return m;
+}
 function currentSet(match){ return match.sets[match.sets.length-1]; }
 
 function setsToWin(bestOf){ return bestOf===3?2:3; }
@@ -143,6 +157,23 @@ function playerPosition(team, playerId, set){
   const lineup = team==='home' ? set.homeLineup : set.awayLineup;
   const idx = lineup.indexOf(playerId);
   return idx===-1 ? null : idx+1;
+}
+
+// PHASE 5/6 (Zuspieler/Läufer) — strikt getrennte Konzepte (Section 24):
+//   ROTATION  = wo steht wer (bereits automatisch über set.homeLineup/rotate() abgedeckt)
+//   ZUSPIELER = wer hält aktuell die Zuspieler-Rolle (set.currentSetterId, NUR vom Trainer explizit gesetzt)
+//   LÄUFER    = die Rotationsposition (1–6), die der/die aktuelle Zuspieler:in GERADE einnimmt —
+//               "Läufer" ist also niemals eine eigene Einstellung, sondern immer nur
+//               playerPosition(...) angewandt auf set.currentSetterId.
+// Wird der/die Zuspieler:in ausgewechselt, wird NIE automatisch jemand anderes zum/zur Zuspieler:in
+// — es wird nur "nicht auf dem Feld" angezeigt, bis der Trainer aktiv über den ZUSPIELER-Button
+// eine neue Wahl trifft (auch wenn die alte Person später wieder eingewechselt wird).
+function currentSetterInfo(match, set){
+  const setterId = set.currentSetterId;
+  if(!setterId) return null;
+  const onCourt = set.homeLineup.includes(setterId);
+  const position = onCourt ? playerPosition('home', setterId, set) : null;
+  return { setterId, onCourt, position, laufer: position };
 }
 
 /* ============================ Rendering-Kern ============================ */
@@ -255,9 +286,17 @@ function go(r){
 // Satz-/Spielende) — bleibt sichtbar, bis er weggeklickt wird, statt die Eingabe zu blockieren.
 function renderBanner(main){
   if(!banner) return;
+  const actions = el('div',{style:'display:flex;gap:8px;flex:0 0 auto;align-items:center;'});
+  if(banner.reload){
+    // PHASE 4: neue Version wurde bereits im Hintergrund installiert (Service Worker) — kein
+    // erzwungener Reload (könnte mitten in einer Rally-Erfassung stören), stattdessen ein klarer,
+    // nicht-blockierender Hinweis mit expliziter Aktualisieren-Aktion.
+    actions.appendChild(el('button',{class:'btn secondary', style:'padding:6px 12px;font-size:12px;', onclick:()=>window.location.reload()},'Aktualisieren'));
+  }
+  actions.appendChild(el('button',{class:'icon-btn', style:'color:#fff;', onclick:()=>{ banner=null; render(); }},'✕'));
   main.appendChild(el('div',{class:'card', style:'background:var(--accent);color:#fff;display:flex;justify-content:space-between;align-items:center;gap:10px;'},[
     el('div',{style:'font-weight:700;font-size:14px;'}, banner.text),
-    el('button',{class:'icon-btn', style:'color:#fff;flex:0 0 auto;', onclick:()=>{ banner=null; render(); }},'✕'),
+    actions,
   ]));
 }
 
@@ -480,7 +519,7 @@ function renderNewMatch(header, main){
   main.appendChild(startBtn);
 }
 
-function newSet(setNumber, homeLineup, awayLineup, servingTeam){
+function newSet(setNumber, homeLineup, awayLineup, servingTeam, initialSetterId){
   return {
     setNumber, homeScore:0, awayScore:0, homeLineup:[...homeLineup], awayLineup:[...awayLineup], servingTeam,
     rallies:[{actions:[]}], winner:null,
@@ -488,7 +527,46 @@ function newSet(setNumber, homeLineup, awayLineup, servingTeam){
     // beliebigen Rotations-Schnappschuss (rally.homeRotation/awayRotation) die Rotationsnummer
     // 1–6 zu bestimmen (homeLineup/awayLineup selbst werden ja live weiterrotiert).
     startHomeLineup:[...homeLineup], startAwayLineup:[...awayLineup],
+    // PHASE 5/6/7 (Zuspieler/Läufer/Wechsel-Historie): eigener, vom Trainer EXPLIZIT gesetzter
+    // Zuspieler (nicht automatisch aus der Rotation abgeleitet) — wird bei einem Satzwechsel vom
+    // vorherigen Satz übernommen (siehe closeRally), damit nicht jeden Satz neu ausgewählt werden muss.
+    currentSetterId: initialSetterId || null,
+    // Log aller Auswechslungen dieses Satzes (normal + Libero), u.a. für CSV-Export und die
+    // Undo-Warnung ("seit dem letzten Ballwechsel wurde gewechselt") genutzt.
+    substitutions: [],
+    subSinceLastPoint: false,
   };
+}
+
+// PHASE 3 (Datenintegrität): stellt sicher, dass ein Satz IMMER eine gültige Start-Aufstellung
+// besitzt. newSet() setzt startHomeLineup/startAwayLineup zwar immer, aber ältere/importierte
+// Spielstände oder ein bisher nicht bekannter Randfall (z.B. manuell bearbeiteter localStorage-
+// Inhalt) könnten diese Felder verlieren — computeRotationTable() würde einen solchen Satz dann
+// komplett stillschweigend aus der Rotationsauswertung ausschließen. Statt das nur zu verstecken,
+// wird hier bestmöglich repariert: aus der frühesten bekannten Rotations-Momentaufnahme dieses
+// Satzes (rally.homeRotation/awayRotation der ersten bereits geschlossenen Rally), ersatzweise aus
+// der aktuellen Aufstellung. So geht die Auswertung für diesen Satz nie mehr einfach "verloren".
+function repairSet(set){
+  if(!set) return set;
+  if(!Array.isArray(set.homeLineup)) set.homeLineup = [];
+  if(!Array.isArray(set.awayLineup)) set.awayLineup = [];
+  if(!Array.isArray(set.startHomeLineup) || set.startHomeLineup.length!==6){
+    const firstRally = (set.rallies||[]).find(r=>Array.isArray(r.homeRotation) && r.homeRotation.length===6);
+    set.startHomeLineup = firstRally ? [...firstRally.homeRotation] : [...set.homeLineup];
+  }
+  if(!Array.isArray(set.startAwayLineup) || set.startAwayLineup.length!==6){
+    const firstRally = (set.rallies||[]).find(r=>Array.isArray(r.awayRotation) && r.awayRotation.length===6);
+    set.startAwayLineup = firstRally ? [...firstRally.awayRotation] : [...set.awayLineup];
+  }
+  if(!Array.isArray(set.substitutions)) set.substitutions = [];
+  if(typeof set.subSinceLastPoint !== 'boolean') set.subSinceLastPoint = false;
+  if(set.currentSetterId===undefined) set.currentSetterId = null;
+  return set;
+}
+function repairMatch(match){
+  if(!match || !Array.isArray(match.sets)) return match;
+  match.sets.forEach(repairSet);
+  return match;
 }
 
 /* ============================ App-Vorschau (Demo) ============================ */
@@ -709,6 +787,10 @@ function fieldSection(main, match, set){
     grid.appendChild(el('button',{class:'btn secondary', style:'flex:1 1 45%;', onclick:()=>{ tagging = {quick:'B', team:null, playerIds:[]}; render(); }}, 'Block'));
     grid.appendChild(el('button',{class:'btn secondary', style:'flex:1 1 45%;', onclick:()=>{ tagging = {quick:'S', team:null, playerId:'', fromPoint:null, toPoint:null}; render(); }}, 'Aufschlag'));
     grid.appendChild(el('button',{class:'btn secondary', style:'flex:1 1 45%;', onclick:()=>{ tagging = {quick:'OE', team:null}; render(); }}, 'Gegner-Fehler'));
+    // PHASE 8: schnelle Annahme-Erfassung — Spieler + Qualität, direkt neben den anderen Schnell-
+    // Buttons (statt nur versteckt in der ausführlichen "+"-Erfassung). Beendet KEINE Rally/keinen
+    // Punkt, die ausführliche Erfassung über "+" bleibt vollständig unverändert erhalten.
+    grid.appendChild(el('button',{class:'btn secondary', style:'flex:1 1 45%;', onclick:()=>{ tagging = {quick:'R', team:null, playerId:''}; render(); }}, 'Annahme'));
     fieldCard.appendChild(grid);
     fieldCard.appendChild(el('button',{class:'btn ghost block', style:'margin-top:8px;', onclick:()=>{ tagging = {legacy:true, skillCode:null, team:null, playerId:'', fromPoint:null, toPoint:null}; render(); }}, '+ weitere Aktion (ausführlich, mit Bewertung)'));
   } else if(tagging.legacy){
@@ -717,6 +799,8 @@ function fieldSection(main, match, set){
     fieldQuickOpponentErrorSection(fieldCard, match);
   } else if(tagging.quick==='B'){
     fieldQuickBlockSection(fieldCard, match, set);
+  } else if(tagging.quick==='R'){
+    fieldQuickReceptionSection(fieldCard, match, set);
   } else {
     fieldQuickAttackServeSection(fieldCard, match, set);
   }
@@ -829,6 +913,38 @@ function fieldQuickAttackServeSection(fieldCard, match, set){
       }}, type));
     });
     fieldCard.appendChild(grid);
+  }
+  fieldCard.appendChild(el('button',{class:'btn ghost block', style:'margin-top:10px', onclick:()=>{ tagging=null; render(); }},'Abbrechen'));
+}
+
+// PHASE 8: Schnellerfassung Annahme — Spieler antippen, dann Qualität wählen (gleiche 5-stufige
+// Skala wie die ausführliche Erfassung). Beendet die Rally NICHT (Annahme ist kein Punkt), daher
+// logAction() statt logQuickPoint(). Die ausführliche Annahme-Erfassung über "+ weitere Aktion"
+// bleibt unverändert bestehen — beide Wege schreiben dieselben Aktionen (skill:'R') und fließen
+// identisch in computeStats()/die Annahme-Analyse ein: "Schnelle Live-Erfassung + detaillierte
+// Analyse später".
+function fieldQuickReceptionSection(fieldCard, match, set){
+  const fixedTeam = set.servingTeam==='home' ? 'away' : 'home'; // die Annahme kommt immer vom nicht-aufschlagenden Team
+  const hintText = tagging.playerId ? 'Annahmequalität wählen.' : 'Auf den Spieler im Feld tippen, der angenommen hat.';
+  fieldCard.appendChild(el('div',{style:'color:var(--accent);font-weight:600;font-size:13px;margin-bottom:8px;'}, 'Annahme erfassen: '+hintText));
+
+  fieldCard.appendChild(buildCourt(set, match, {
+    selectableTeam: fixedTeam,
+    onSelectPlayer: (team,pid)=>{ tagging.team=team; tagging.playerId=pid; render(); },
+    selectedPlayerId: tagging.playerId,
+  }));
+
+  if(tagging.playerId){
+    const evalRow = el('div',{class:'row eval-row', style:'margin-top:10px;'});
+    EVALS.forEach(ev=>{
+      evalRow.appendChild(el('button',{class:'btn secondary '+ev.cls, style:'flex:1 1 18%;', onclick:()=>{
+        const t = tagging;
+        tagging = null;
+        logAction(match, 'R', t.team, t.playerId, ev.code, null, null);
+      }}, ev.code+' '+ev.label));
+    });
+    fieldCard.appendChild(el('label',{},'Annahmequalität'));
+    fieldCard.appendChild(evalRow);
   }
   fieldCard.appendChild(el('button',{class:'btn ghost block', style:'margin-top:10px', onclick:()=>{ tagging=null; render(); }},'Abbrechen'));
 }
@@ -984,7 +1100,7 @@ function substitutionSection(main, match, set){
   const headRow = el('div',{style:'display:flex;justify-content:space-between;align-items:center;gap:8px;'});
   headRow.appendChild(el('h2',{style:'margin:0'},'Wechsel'));
   headRow.appendChild(el('button',{class:'btn secondary', onclick:()=>{
-    subbing = subbing ? null : {team:'home', posIdx:0, newPlayerId:''};
+    subbing = subbing ? null : {team:'home', posIdx:0, newPlayerId:'', isLibero:false};
     render();
   }}, subbing ? 'Schließen' : '🔄 Wechsel'));
   card.appendChild(headRow);
@@ -1029,10 +1145,34 @@ function substitutionSection(main, match, set){
       if(outP && inP) card.appendChild(playerCompareBox(outId, outP, subbing.newPlayerId, inP));
     }
 
+    // PHASE 7 (Libero): ein Libero-Wechsel ist volleyballregel-technisch etwas anderes als eine
+    // reguläre taktische Auswechslung (unbegrenzt wiederholbar, zählt nicht gegen das Sub-Limit) —
+    // daher separat markierbar, statt einen ganz neuen Dialog zu bauen.
+    const liberoRow = el('label',{style:'display:flex;align-items:center;gap:8px;margin-top:10px;font-size:13px;'});
+    const liberoChk = el('input',{type:'checkbox'});
+    liberoChk.checked = !!subbing.isLibero;
+    liberoChk.addEventListener('change', e=>{ subbing.isLibero = e.target.checked; render(); });
+    liberoRow.appendChild(liberoChk);
+    liberoRow.appendChild(document.createTextNode('Dies ist ein Libero-Wechsel (zählt nicht als reguläre Auswechslung)'));
+    card.appendChild(liberoRow);
+
     card.appendChild(el('button',{class:'btn block', style:'margin-top:10px', onclick:()=>{
       if(!subbing.newPlayerId){ alert('Bitte eine Spielerin/einen Spieler von der Bank auswählen.'); return; }
       const lu = subbing.team==='home' ? set.homeLineup : set.awayLineup;
-      lu[subbing.posIdx] = subbing.newPlayerId;
+      const outId = lu[subbing.posIdx];
+      const inId = subbing.newPlayerId;
+      const type = subbing.isLibero ? 'libero' : 'normal';
+      if(type==='normal'){
+        const usedNormal = (set.substitutions||[]).filter(s=>s.team===subbing.team && s.type==='normal').length;
+        if(usedNormal >= MAX_NORMAL_SUBS_PER_SET){
+          const teamName = subbing.team==='home' ? state.teamName : match.opponentName;
+          if(!confirm('Achtung: Dies wäre bereits die '+(usedNormal+1)+'. reguläre Auswechslung von '+teamName+' in diesem Satz (üblich max. '+MAX_NORMAL_SUBS_PER_SET+'). Trotzdem durchführen?')) return;
+        }
+      }
+      lu[subbing.posIdx] = inId;
+      set.substitutions = set.substitutions || [];
+      set.substitutions.push({ts:Date.now(), team:subbing.team, posIdx:subbing.posIdx, outId, inId, type});
+      set.subSinceLastPoint = true; // Section 18: Grundlage für die Undo-Warnung
       saveState();
       subbing = null;
       render();
@@ -1085,9 +1225,16 @@ function undoLastPoint(match){
     alert('Kein Punkt zum Rückgängigmachen vorhanden.');
     return;
   }
-  if(!confirm('Letzten Punkt wirklich rückgängig machen?\nSpielstand, Rotation und Aufschlagrecht (und ggf. Satz-/Spielende) werden zurückgesetzt.')) return;
+  // Section 18: falls seit dem letzten Ballwechsel bereits gewechselt wurde, deutlich davor warnen —
+  // ein Undo würde diese Auswechslung mit zurücknehmen.
+  const curSet = currentSet(match);
+  const msg = (curSet && curSet.subSinceLastPoint)
+    ? 'Seit dem letzten Ballwechsel wurde eine Auswechslung durchgeführt. Soll wirklich zurückgesetzt werden?'
+    : 'Letzten Punkt wirklich rückgängig machen?\nSpielstand, Rotation und Aufschlagrecht (und ggf. Satz-/Spielende) werden zurückgesetzt.';
+  if(!confirm(msg)) return;
   const snap = match.pointHistory.pop();
   match.sets = snap.sets;
+  match.sets.forEach(repairSet); // Verteidigungslinie #3: direkt nach der Wiederherstellung absichern
   match.status = snap.status;
   lastPointRally = null;
   commenting = null;
@@ -1167,11 +1314,14 @@ function closeRally(match, pointTo){
       // Neuer Satz - gleiche Startaufstellung wie zu Satzbeginn wird hier vereinfachend beibehalten (letzte Rotation),
       // Trainer kann bei Bedarf über "Aufstellung" künftig anpassen.
       const nextServe = set.winner; // vereinfachte Regel: Satzgewinner schlägt im Folgesatz auf (bei echtem Volleyball wechselt es je nach Satzstand)
-      match.sets.push(newSet(set.setNumber+1, set.homeLineup, set.awayLineup, nextServe));
+      // Zuspieler-Zuordnung wird in den neuen Satz übernommen (muss nicht jeden Satz neu gesetzt
+      // werden) — Rotation/Aufstellung bleiben davon wie gehabt unberührt.
+      match.sets.push(newSet(set.setNumber+1, set.homeLineup, set.awayLineup, nextServe, set.currentSetterId));
       saveState();
       banner = {text:'✅ Satz beendet: '+set.homeScore+':'+set.awayScore+'. Weiter geht’s mit Satz '+(set.setNumber+1)+'.'};
     }
   } else {
+    set.subSinceLastPoint = false; // die Auswechslung(en) vor diesem Punkt sind jetzt Teil der Historie
     set.rallies.push({actions:[]});
     saveState();
   }
@@ -1615,6 +1765,8 @@ function renderStats(header, main){
   if(!match){ go({name:'home'}); return; }
   header.appendChild(el('button',{class:'back', onclick:()=>go({name:'home'})}, demoMode ? '✕ Demo beenden' : '← Spiele'));
   header.appendChild(el('h1',{},'Statistik'));
+  // Section 22: Coach Live bleibt auch nach Spielende erreichbar (nutzt weiterhin die gespeicherten Daten).
+  header.appendChild(el('button',{class:'icon-btn', onclick:()=>go({name:'coachLive', matchId:match.id})},'🎯'));
   if(match.status!=='finished'){
     header.appendChild(el('button',{class:'icon-btn', onclick:()=>go({name:'live', matchId:match.id})},'🏐'));
   }
@@ -1779,7 +1931,7 @@ function renderCoachLive(header, main){
   if(!match){ go({name:'home'}); return; }
   const set = currentSet(match);
 
-  header.appendChild(el('button',{class:'back', onclick:()=>go({name:'live', matchId:match.id})}, '← Live'));
+  header.appendChild(el('button',{class:'back', onclick:()=>go({name: match.status==='finished'?'stats':'live', matchId:match.id})}, match.status==='finished' ? '← Statistik' : '← Live'));
   header.appendChild(el('h1',{},'🎯 Coach Live'));
 
   const analytics = computeTeamAnalytics(match);
@@ -1839,6 +1991,45 @@ function renderCoachLive(header, main){
     main.appendChild(card);
   } else {
     main.appendChild(el('div',{class:'card empty'}, 'Noch zu wenige Angriffs-Daten (mind. '+MIN_ATTACK_ATTEMPTS+' Versuche pro Spieler:in) für eine Einschätzung.'));
+  }
+
+  // PHASE 5/6: Zuspieler/Läufer — kompakt, siehe currentSetterInfo() für die Ableitungslogik.
+  const setterInfo = currentSetterInfo(match, set);
+  const setterCard = el('div',{class:'card'});
+  const setterLabel = setterInfo
+    ? ('Zuspieler: #'+playerName('home',setterInfo.setterId,match)+(setterInfo.onCourt ? '' : ' – NICHT AUF DEM FELD'))
+    : 'Zuspieler: – (noch nicht festgelegt)';
+  setterCard.appendChild(el('button',{class:'btn secondary block', onclick:()=>{ zuspielerModal = {selectedId: setterInfo?setterInfo.setterId:''}; render(); }}, '🅉 '+setterLabel));
+  if(setterInfo && setterInfo.onCourt){
+    setterCard.appendChild(el('div',{style:'display:flex;gap:18px;margin-top:8px;font-size:13px;color:var(--muted);'},[
+      el('div',{},'Position: '+setterInfo.position),
+      el('div',{},'Läufer: '+setterInfo.laufer),
+    ]));
+  }
+  main.appendChild(setterCard);
+
+  if(zuspielerModal){
+    const modalCard = el('div',{class:'card', style:'border:2px solid var(--accent);'});
+    modalCard.appendChild(el('h2',{},'Zuspieler festlegen'));
+    modalCard.appendChild(el('div',{style:'font-size:12px;color:var(--muted);margin-bottom:8px;'},
+      'Aktueller Zuspieler / '+(setterInfo? ('#'+playerNumber('home',setterInfo.setterId,match)) : '–')));
+    const list = el('div',{class:'row'});
+    state.roster.slice().sort((a,b)=>a.number-b.number).forEach(p=>{
+      const selected = zuspielerModal.selectedId===p.id;
+      list.appendChild(el('button',{class: selected?'btn':'btn secondary', style:'flex:1 1 30%;', onclick:()=>{ zuspielerModal.selectedId=p.id; render(); }}, '#'+p.number+(p.name?' '+p.name:'')));
+    });
+    modalCard.appendChild(list);
+    const btnRow = el('div',{style:'display:flex;gap:10px;margin-top:12px;'});
+    btnRow.appendChild(el('button',{class:'btn block', style:'flex:1', onclick:()=>{
+      if(!zuspielerModal.selectedId){ alert('Bitte eine Spielerin/einen Spieler auswählen.'); return; }
+      set.currentSetterId = zuspielerModal.selectedId; // Rotation bleibt unangetastet — nur die Rollenzuordnung ändert sich.
+      saveState();
+      zuspielerModal = null;
+      render();
+    }}, 'Als Zuspieler festlegen'));
+    btnRow.appendChild(el('button',{class:'btn ghost', style:'flex:1', onclick:()=>{ zuspielerModal=null; render(); }}, 'Schließen'));
+    modalCard.appendChild(btnRow);
+    main.appendChild(modalCard);
   }
 
   renderRallyHistoryStrip(main, match);
@@ -2063,23 +2254,44 @@ function thStyle(){ return 'text-align:center;padding:6px 4px;border-bottom:1px 
 function tdStyle(){ return 'text-align:center;padding:6px 4px;border-bottom:1px solid var(--line);'; }
 
 function exportCSV(match){
-  let rows = [['Satz','Rally','Team','Skill','Art','Spieler','Bewertung','Von(x,y)','Ziel(x,y)','Kommentar']];
+  // Section 21: CSV soll möglichst ALLE relevanten Rally-Daten enthalten, ohne bereits exportierte
+  // Spalten zu verlieren — deshalb werden die bisherigen Spalten unverändert beibehalten und nur
+  // ergänzt: Fehler-Zuordnung (wer hat den Fehler verursacht / wer wurde geblockt), Zuspieler/Läufer
+  // zum Zeitpunkt der jeweiligen Rally, sowie eigene Zeilen für Auswechslungen (normal + Libero).
+  let rows = [['Satz','Rally','Team','Skill','Art','Spieler','Bewertung','Von(x,y)','Ziel(x,y)','Fehler-Zuordnung','Kommentar','Zuspieler(Heim)','Läufer(Heim)']];
   match.sets.forEach(set=>{
     set.rallies.forEach((rally,ri)=>{
+      let setterNum = '', laufer = '';
+      if(set.currentSetterId){
+        setterNum = playerNumber('home', set.currentSetterId, match);
+        if(Array.isArray(rally.homeRotation)){
+          const idx = rally.homeRotation.indexOf(set.currentSetterId);
+          laufer = idx===-1 ? 'nicht auf Feld' : String(idx+1);
+        }
+      }
       rally.actions.forEach(a=>{
         const from = a.fromPoint ? (a.fromPoint.x+','+a.fromPoint.y) : '';
         const to = a.toPoint ? (a.toPoint.x+','+a.toPoint.y) : '';
         const ids = a.playerIds || (a.playerId ? [a.playerId] : []);
         const names = ids.map(pid=>playerName(a.team,pid,match)).join(', ');
         const skillLabel = (SKILL_MAP[a.skill]||{label:a.skill}).label;
-        rows.push([set.setNumber, ri+1, a.team==='home'?state.teamName:match.opponentName, skillLabel, a.type||'', names, a.code, from, to, '']);
+        let attrib = '';
+        if(a.errorPlayerId) attrib = 'Fehlerverursacher: '+playerName(a.errorTeam, a.errorPlayerId, match);
+        else if(a.blockedPlayerId) attrib = 'Geblockter Angreifer: '+playerName(a.blockedTeam, a.blockedPlayerId, match);
+        rows.push([set.setNumber, ri+1, a.team==='home'?state.teamName:match.opponentName, skillLabel, a.type||'', names, a.code, from, to, attrib, '', setterNum, laufer]);
       });
       // Diktierter/getippter Fehler-Kommentar zum Team, das diesen Punkt verloren hat.
       if(rally.comment){
         const cTeamName = rally.comment.team==='home' ? state.teamName : match.opponentName;
         const names = (rally.comment.playerIds||[]).map(pid=>playerName(rally.comment.team, pid, match)).join(', ');
-        rows.push([set.setNumber, ri+1, cTeamName, 'Fehler-Notiz', '', names, '', '', '', rally.comment.text]);
+        rows.push([set.setNumber, ri+1, cTeamName, 'Fehler-Notiz', '', names, '', '', '', '', rally.comment.text, setterNum, laufer]);
       }
+    });
+    (set.substitutions||[]).forEach(s=>{
+      const teamName = s.team==='home' ? state.teamName : match.opponentName;
+      const outName = playerName(s.team, s.outId, match);
+      const inName = playerName(s.team, s.inId, match);
+      rows.push([set.setNumber, '', teamName, s.type==='libero'?'Libero-Wechsel':'Auswechslung', '', outName+' → '+inName, '', '', '', '', '', '', '']);
     });
   });
   const csv = rows.map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(',')).join('\n');
@@ -2095,8 +2307,26 @@ function exportCSV(match){
 
 render();
 
+// PHASE 4: robuste Update-Erkennung. Der Service Worker selbst holt Assets bereits "network-first"
+// UND ohne den normalen HTTP-Cache des Browsers zu benutzen (siehe sw.js, fetch mit
+// {cache:'no-store'}) — das behebt das in der QA gefundene Risiko, dass trotz "network-first"
+// still eine veraltete, aus dem HTTP-Cache bediente Version lief. Zusätzlich: sobald ein bereits im
+// Hintergrund installierter neuer Service Worker aktiv wird, einen nicht-blockierenden Hinweis
+// zeigen (kein alert(), kein erzwungener Reload) — localStorage/Spielstände werden dabei nie
+// angefasst, ein Service Worker hat darauf gar keinen Zugriff.
 if('serviceWorker' in navigator){
   window.addEventListener('load', ()=>{
-    navigator.serviceWorker.register('sw.js').catch(()=>{});
+    navigator.serviceWorker.register('sw.js').then(reg=>{
+      // Regelmäßig aktiv nach einer neueren Version suchen (z.B. wenn die App lange offen bleibt).
+      setInterval(()=>{ reg.update().catch(()=>{}); }, 5*60*1000);
+    }).catch(()=>{});
+    let alreadyControlled = !!navigator.serviceWorker.controller;
+    navigator.serviceWorker.addEventListener('controllerchange', ()=>{
+      // Nur zeigen, wenn zuvor bereits eine andere Version aktiv war (echtes Update) — nicht bei der
+      // allerersten Installation, wo es noch nichts zu "aktualisieren" gibt.
+      if(!alreadyControlled){ alreadyControlled = true; return; }
+      banner = { text:'🔄 Neue Version verfügbar – App aktualisieren', reload:true };
+      render();
+    });
   });
 }
