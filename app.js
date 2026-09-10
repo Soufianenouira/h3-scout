@@ -232,6 +232,31 @@ function buildCourt(set, match, opts={}){
   [34,66].forEach(x=>{
     svg.appendChild(svgEl('line',{x1:x,y1:2,x2:x,y2:128,stroke:'#e8f5ea','stroke-width':0.4,'stroke-opacity':0.5}));
   });
+  // Echte Feld-Referenzlinien für die Tiefe (helfen bei der Einschätzung, wo ein Ball landet):
+  // jede Hälfte ist 9m tief (Netz bis Grundlinie), das Feld ist y=2..128 (126 Einheiten) mit Netz
+  // bei y=65 — pro Halbfeld also 63 Einheiten = 9m, 1m = 7 Einheiten. Angriffslinie (3-Meter-Linie)
+  // gestrichelt markiert, dazu dezente 1m-Ticks an beiden Seitenlinien sowie "3 m"/"9 m"-Beschriftung.
+  const M = 7; // Einheiten pro Meter (Tiefe)
+  [1,-1].forEach(dir=>{ // dir=1: eigene Hälfte (unten), dir=-1: Gegnerhälfte (oben)
+    const attackY = 65 + dir*3*M;
+    svg.appendChild(svgEl('line',{x1:2,y1:attackY,x2:98,y2:attackY, stroke:'#e8f5ea','stroke-width':1,'stroke-opacity':0.65,'stroke-dasharray':'3,2.5'}));
+    const attackLabel = svgEl('text',{x:4,y:attackY+(dir*-2.5), 'font-size':4.2, fill:'#e8f5ea','fill-opacity':0.7,'font-weight':700});
+    attackLabel.textContent = '3 m';
+    svg.appendChild(attackLabel);
+    // 1m-Ticks an beiden Seitenlinien, vom Netz bis kurz vor die Grundlinie (die selbst schon als
+    // durchgezogene Feldkante markiert ist).
+    for(let k=1; k<=8; k++){
+      const y = 65 + dir*k*M;
+      [2,98].forEach(sx=>{
+        const inward = sx===2 ? 1 : -1;
+        svg.appendChild(svgEl('line',{x1:sx,y1:y,x2:sx+inward*(k%3===0?2.6:1.5),y2:y, stroke:'#e8f5ea','stroke-width':0.6,'stroke-opacity':k%3===0?0.55:0.32}));
+      });
+    }
+    const baseY = 65 + dir*9*M;
+    const baseLabel = svgEl('text',{x:4,y:baseY+(dir*-2.5), 'font-size':4.2, fill:'#e8f5ea','fill-opacity':0.7,'font-weight':700});
+    baseLabel.textContent = '9 m';
+    svg.appendChild(baseLabel);
+  });
 
   if(opts.onTapTarget){
     // Die ganze Fläche inkl. Freizone ist antippbar (Aufschlagzone, Bälle im Aus, o.ä.)
@@ -1047,11 +1072,13 @@ function fieldQuickAttackServeSection(fieldCard, match, set){
   const types = isServe ? SERVE_TYPES : ATTACK_TYPES;
   const fixedTeam = isServe ? set.servingTeam : null; // Aufschlag: nur das aufschlagende Team kann antippbar sein
   const canPickType = tagging.playerId && tagging.fromPoint && tagging.toPoint;
+  const awaitingReceiverAttribution = isServe && !!tagging.type;
 
   let hintText;
   if(!tagging.playerId) hintText = 'Auf den Spieler im Feld tippen, der '+(isServe?'aufgeschlagen':'angegriffen')+' hat.';
   else if(!tagging.fromPoint) hintText = 'Startposition antippen (auch in der Freizone möglich).';
   else if(!tagging.toPoint) hintText = 'Zielposition antippen.';
+  else if(awaitingReceiverAttribution) hintText = 'Optional: wer hat die Annahme vergeben?';
   else hintText = 'Art wählen — das ist direkt der Punkt.';
   fieldCard.appendChild(el('div',{style:'color:var(--accent);font-weight:600;font-size:13px;margin-bottom:8px;'}, label+' erfassen: '+hintText));
 
@@ -1072,23 +1099,45 @@ function fieldQuickAttackServeSection(fieldCard, match, set){
   // — er kann nötig sein, während noch weiter im Feld getippt wird (Ziel fehlt noch), und darf
   // deshalb nie einen Teil des Feldes verdecken, den man als Nächstes antippen will.
   const resetBtn = (tagging.playerId && (tagging.fromPoint || tagging.toPoint))
-    ? el('button',{class:'btn ghost btn-sm block', style:'margin-top:8px;font-size:12px;', onclick:()=>{ tagging.fromPoint=null; tagging.toPoint=null; render(); }},'↺ Start-/Zielposition neu setzen')
+    ? el('button',{class:'btn ghost btn-sm block', style:'margin-top:8px;font-size:12px;', onclick:()=>{ tagging.fromPoint=null; tagging.toPoint=null; tagging.type=null; render(); }},'↺ Start-/Zielposition neu setzen')
     : null;
 
   // Die Art-Auswahl selbst erscheint erst, wenn Spieler + Start/Ziel bereits feststehen — im Feld
   // muss dann nichts mehr angetippt werden, ein Overlay über einen Teil davon ist unproblematisch.
+  // Beim Aufschlag gibt es bei "Annahmefehler (Ball ins Aus)" danach noch einen optionalen
+  // (überspringbaren) Zwischenschritt: wer beim empfangenden Team hat die Annahme vergeben — analog
+  // zur bestehenden Zuordnung bei Gegner-Fehler/Block, siehe fieldQuickOpponentErrorSection().
   const actionEls = [];
-  if(canPickType){
+  if(canPickType && !awaitingReceiverAttribution){
     actionEls.push(el('label',{},'Art des '+label+'s'));
     const grid = el('div',{class:'row'});
     types.forEach(type=>{
       grid.appendChild(el('button',{class:'btn secondary btn-sm', style:'flex:1 1 45%;', onclick:()=>{
+        if(isServe && type==='Annahmefehler (Ball ins Aus)'){ tagging.type = type; render(); return; }
         const t = tagging;
         tagging = null;
         logQuickPoint(match, {skillCode:t.quick, team:t.team, playerId:t.playerId, type, fromPoint:t.fromPoint, toPoint:t.toPoint});
       }}, type));
     });
     actionEls.push(grid);
+  } else if(awaitingReceiverAttribution){
+    const receivingTeam = tagging.team==='home' ? 'away' : 'home';
+    const roster = (receivingTeam==='home' ? state.roster : match.opponentRoster).slice().sort((a,b)=>a.number-b.number);
+    actionEls.push(el('label',{}, tagging.type+' — optional: wer hat die Annahme vergeben?'));
+    const grid = el('div',{class:'row'});
+    roster.forEach(p=>{
+      grid.appendChild(el('button',{class:'btn secondary btn-sm', style:'flex:1 1 30%;', onclick:()=>{
+        const t = tagging;
+        tagging = null;
+        logQuickPoint(match, {skillCode:t.quick, team:t.team, playerId:t.playerId, type:t.type, fromPoint:t.fromPoint, toPoint:t.toPoint, errorPlayerId:p.id, errorTeam:receivingTeam, errorSkill:'R'});
+      }}, '#'+p.number+(p.name?(' '+p.name):'')));
+    });
+    actionEls.push(grid);
+    actionEls.push(el('button',{class:'btn ghost btn-sm block', style:'margin-top:2px;', onclick:()=>{
+      const t = tagging;
+      tagging = null;
+      logQuickPoint(match, {skillCode:t.quick, team:t.team, playerId:t.playerId, type:t.type, fromPoint:t.fromPoint, toPoint:t.toPoint});
+    }},'Ohne Zuordnung speichern'));
   }
   fieldCard.appendChild(fieldRow(courtSvg, actionEls, {overlay:true}));
   if(resetBtn) fieldCard.appendChild(resetBtn);
@@ -1442,10 +1491,12 @@ function logQuickPoint(match, opts){
     action.toPoint = {x:Math.round(opts.toPoint.x*10)/10, y:Math.round(opts.toPoint.y*10)/10};
   }
   // Optionale Spieler-Zuordnung: wer hat bei einem Gegner-Fehler den Angriffsfehler gemacht, bzw.
-  // welche:r gegnerische Angreifer:in wurde beim Block geblockt — beides freiwillig (siehe die
-  // jeweiligen fieldQuick*-Funktionen), fließt in computeStats() in die Angriffsstatistik der
-  // betroffenen Person ein, ohne die Punkt-/Team-Zuordnung der Aktion selbst zu verändern.
-  if(opts.errorPlayerId){ action.errorPlayerId = opts.errorPlayerId; action.errorTeam = opts.errorTeam; }
+  // bei einem Ass wegen Annahmefehler die Annahme vergeben, bzw. welche:r gegnerische Angreifer:in
+  // wurde beim Block geblockt — alles freiwillig (siehe die jeweiligen fieldQuick*-Funktionen),
+  // fließt in computeStats() in die jeweilige Skill-Statistik der betroffenen Person ein (welcher
+  // Skill das ist, steht in opts.errorSkill — 'A' für Angriffsfehler, 'R' für Annahmefehler),
+  // OHNE die Punkt-/Team-Zuordnung der Aktion selbst zu verändern.
+  if(opts.errorPlayerId){ action.errorPlayerId = opts.errorPlayerId; action.errorTeam = opts.errorTeam; action.errorSkill = opts.errorSkill || 'A'; }
   if(opts.blockedPlayerId){ action.blockedPlayerId = opts.blockedPlayerId; action.blockedTeam = opts.blockedTeam; }
   rally.actions.push(action);
   lastPointRally = { matchId: match.id, rally, winningTeam: opts.team };
@@ -1691,10 +1742,11 @@ function computeStats(match, opts={}){
       // Aktionen genau eine:n (a.playerId); Gegner-Fehler hat gar keine:n (ids bleibt leer).
       const ids = a.playerIds || (a.playerId ? [a.playerId] : []);
       ids.forEach(pid=> creditSkill(ensure(a.team, pid), a.skill, a.code));
-      // Optionale Zuordnung bei Gegner-Fehler: der Angriffsfehler wird der Person angerechnet,
-      // die ihn tatsächlich begangen hat (unter "A" als Fehler gezählt) — unabhängig davon,
+      // Optionale Zuordnung bei Gegner-Fehler bzw. Ass-wegen-Annahmefehler: der Fehler wird der
+      // Person angerechnet, die ihn tatsächlich begangen hat (a.errorSkill sagt, in welcher
+      // Statistik — 'A' Angriff oder 'R' Annahme — als Fehler gezählt wird), unabhängig davon,
       // welchem Team der Punkt selbst gutgeschrieben wird.
-      if(a.errorPlayerId) creditSkill(ensure(a.errorTeam, a.errorPlayerId), 'A', '=');
+      if(a.errorPlayerId) creditSkill(ensure(a.errorTeam, a.errorPlayerId), a.errorSkill || 'A', '=');
       // Optionale Zuordnung beim Block: wer wurde geblockt — eigene Kennzahl, kein "Fehler" in
       // der Bewertungsskala, da hierfür keine allgemeingültige Einzelschuld existiert.
       if(a.blockedPlayerId) ensure(a.blockedTeam, a.blockedPlayerId).blockedAgainst++;
@@ -2474,7 +2526,7 @@ function exportCSV(match){
         const names = ids.map(pid=>playerName(a.team,pid,match)).join(', ');
         const skillLabel = (SKILL_MAP[a.skill]||{label:a.skill}).label;
         let attrib = '';
-        if(a.errorPlayerId) attrib = 'Fehlerverursacher: '+playerName(a.errorTeam, a.errorPlayerId, match);
+        if(a.errorPlayerId) attrib = (a.errorSkill==='R' ? 'Annahme vergeben: ' : 'Fehlerverursacher: ')+playerName(a.errorTeam, a.errorPlayerId, match);
         else if(a.blockedPlayerId) attrib = 'Geblockter Angreifer: '+playerName(a.blockedTeam, a.blockedPlayerId, match);
         rows.push([set.setNumber, ri+1, a.team==='home'?state.teamName:match.opponentName, skillLabel, a.type||'', names, a.code, from, to, attrib, '', setterNum, laufer]);
       });

@@ -1,5 +1,5 @@
 // H3 Scout Service Worker — cached App-Shell für vollständige Offline-Nutzung.
-const CACHE = 'h3scout-cache-v4';
+const CACHE = 'h3scout-cache-v5';
 const ASSETS = [
   './',
   './index.html',
