@@ -622,83 +622,201 @@ function demoAwayRoster(){
   return [1,2,3,4,5,6,7].map(n=>({id:'demoA'+n, number:n, name:''}));
 }
 
+// Deterministischer Zufallszahlengenerator (mulberry32) — die Vorschau soll bei jedem Start immer
+// dieselbe, aber realistisch aussehende Statistik zeigen (reproduzierbar, u.a. fürs Testen).
+function mulberry32(seed){
+  return function(){
+    seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// Punktevergabe + Rotation für EINE simulierte Rally — bewusst dieselbe Logik wie im "echten"
+// closeRally() (Rotation nur beim Seitenwechsel, Aufschlagrecht wechselt mit), aber ohne dessen
+// UI-Nebenwirkungen (kein go()/banner/saveState — die Vorschau läuft komplett im Speicher und wird
+// erst am Ende einmal fertig zusammengebaut).
+function demoApplyPoint(set, pointTo){
+  const wasServing = set.servingTeam;
+  const closingRally = set.rallies[set.rallies.length-1];
+  closingRally.winningTeam = pointTo;
+  closingRally.startServingTeam = wasServing;
+  closingRally.homeRotation = [...set.homeLineup];
+  closingRally.awayRotation = [...set.awayLineup];
+  closingRally.homeScoreBefore = set.homeScore;
+  closingRally.awayScoreBefore = set.awayScore;
+  closingRally.setNumber = set.setNumber;
+  if(pointTo==='home') set.homeScore++; else set.awayScore++;
+  if(pointTo!==wasServing){
+    if(pointTo==='home') set.homeLineup = rotate(set.homeLineup);
+    else set.awayLineup = rotate(set.awayLineup);
+    set.servingTeam = pointTo;
+  }
+}
+
+// Simuliert einen kompletten Satz (bis 25, zwei Punkte Vorsprung) mit einem realistischen, aber
+// bewusst überschaubaren Rally-Ablauf: Aufschlag -> Annahme -> Zuspiel -> Angriff -> ggf. einmal
+// Block/Abwehr + Gegenangriff. Deckt dabei ALLE sechs Skills (S/R/A/B/D/E) für beide Teams ab und
+// verteilt Start-/Zielpunkte breit über das ganze Feld (kontinuierlich statt nur ein paar feste
+// Punkte) — wichtig, damit die feinere 36-Zonen-Heatmap in der Vorschau auch wirklich gefüllt aussieht.
+function simulateSet(set, rng, homeSetterId, awaySetterId){
+  const rnd = (a,b)=> a + rng()*(b-a);
+  const pick = arr => arr[Math.floor(rng()*arr.length)];
+  let tsCounter = 0;
+  function mk(skill, team, pid, code, from, to, type){
+    const a = { skill, team, playerId: pid, code, ts: Date.now()+(tsCounter++) };
+    if(ZONE_SKILLS.includes(skill) && from && to){ a.fromPoint = from; a.toPoint = to; }
+    if(type) a.type = type;
+    return a;
+  }
+  // Zielbereich für einen Angriff/Aufschlag, der auf die Feldhälfte von "targetTeam" geht.
+  function landingSpot(targetTeam){
+    const x = rnd(4,96);
+    const y = targetTeam==='home' ? rnd(70,126) : rnd(4,60);
+    return {x: Math.round(x*10)/10, y: Math.round(y*10)/10};
+  }
+  function frontRowIdx(excludeId, lineup){
+    return [1,2,3].filter(i=> lineup[i]!==excludeId);
+  }
+  function backRowIdx(excludeId, lineup){
+    return [0,4,5].filter(i=> lineup[i]!==excludeId);
+  }
+
+  function simulateRally(){
+    const rally = set.rallies[set.rallies.length-1];
+    const serverTeam = set.servingTeam;
+    const receiverTeam = serverTeam==='home' ? 'away' : 'home';
+    const serverLineup = serverTeam==='home' ? set.homeLineup : set.awayLineup;
+    const receiverLineup = receiverTeam==='home' ? set.homeLineup : set.awayLineup;
+    const serverId = serverLineup[0];
+
+    // 1) AUFSCHLAG
+    const serveTarget = landingSpot(receiverTeam);
+    const r1 = rng();
+    if(r1 < 0.10){ // Ass
+      rally.actions.push(mk('S', serverTeam, serverId, '#', positionCoord(serverTeam,1), serveTarget));
+      return serverTeam;
+    }
+    if(r1 < 0.18){ // Aufschlagfehler
+      rally.actions.push(mk('S', serverTeam, serverId, '=', positionCoord(serverTeam,1), serveTarget));
+      return receiverTeam;
+    }
+    rally.actions.push(mk('S', serverTeam, serverId, pick(['+','+','!','-']), positionCoord(serverTeam,1), serveTarget));
+
+    // 2) ANNAHME (Rückraum, nicht der/die Zuspieler:in)
+    const receiverSetterId = receiverTeam==='home' ? homeSetterId : awaySetterId;
+    const recvIdx = pick(backRowIdx(receiverSetterId, receiverLineup));
+    const receiverId = receiverLineup[recvIdx];
+    if(rng() < 0.05){ // Annahmefehler
+      rally.actions.push(mk('R', receiverTeam, receiverId, '='));
+      return serverTeam;
+    }
+    rally.actions.push(mk('R', receiverTeam, receiverId, pick(['#','#','+','+','!','-'])));
+
+    // 3) ZUSPIEL
+    const setterId = receiverTeam==='home' ? homeSetterId : awaySetterId;
+    if(rng() < 0.02){ // sehr seltener Zuspielfehler
+      rally.actions.push(mk('E', receiverTeam, setterId, '='));
+      return serverTeam;
+    }
+    rally.actions.push(mk('E', receiverTeam, setterId, pick(['#','+','+','!'])));
+
+    // 4) ANGRIFF (Rückraum-Zuspielerin greift so gut wie nie an)
+    const attTeam1 = receiverTeam, defTeam1 = serverTeam;
+    const attLineup1 = receiverLineup, defLineup1 = serverLineup;
+    const att1Idx = pick(frontRowIdx(setterId, attLineup1));
+    const att1Id = attLineup1[att1Idx];
+    const att1From = positionCoord(attTeam1, att1Idx+1);
+    const att1To = landingSpot(defTeam1);
+    const r4 = rng();
+    if(r4 < 0.38){ // Punkt
+      rally.actions.push(mk('A', attTeam1, att1Id, '#', att1From, att1To, pick(ATTACK_TYPES)));
+      return attTeam1;
+    }
+    if(r4 < 0.50){ // Fehler
+      rally.actions.push(mk('A', attTeam1, att1Id, '=', att1From, att1To, pick(ATTACK_TYPES)));
+      return defTeam1;
+    }
+    rally.actions.push(mk('A', attTeam1, att1Id, pick(['+','!','-']), att1From, att1To, pick(ATTACK_TYPES)));
+
+    // 5) BLOCK-VERSUCH des verteidigenden Teams
+    const defSetterId = defTeam1==='home' ? homeSetterId : awaySetterId;
+    const blockIdx = pick(frontRowIdx(defSetterId, defLineup1));
+    const blockId = defLineup1[blockIdx];
+    if(rng() < 0.15){ // direkter Blockpunkt
+      rally.actions.push(mk('B', defTeam1, blockId, '#', null, null, pick(BLOCK_TYPES)));
+      return defTeam1;
+    }
+
+    // 6) ABWEHR (Rückraum des verteidigenden Teams) + verkürzter Gegenangriff, der die Rally sicher beendet
+    const digIdx = pick(backRowIdx(defSetterId, defLineup1));
+    const digId = defLineup1[digIdx];
+    if(rng() < 0.05){ // Abwehrfehler
+      rally.actions.push(mk('D', defTeam1, digId, '='));
+      return attTeam1;
+    }
+    rally.actions.push(mk('D', defTeam1, digId, pick(['#','+','!'])));
+
+    const att2Idx = pick(frontRowIdx(defSetterId, defLineup1));
+    const att2Id = defLineup1[att2Idx];
+    const att2From = positionCoord(defTeam1, att2Idx+1);
+    const att2To = landingSpot(attTeam1);
+    if(rng() < 0.6){
+      rally.actions.push(mk('A', defTeam1, att2Id, '#', att2From, att2To, pick(ATTACK_TYPES)));
+      return defTeam1;
+    }
+    rally.actions.push(mk('A', defTeam1, att2Id, '=', att2From, att2To, pick(ATTACK_TYPES)));
+    return attTeam1;
+  }
+
+  while(true){
+    const target = 25;
+    const lead = Math.abs(set.homeScore - set.awayScore);
+    if((set.homeScore>=target || set.awayScore>=target) && lead>=2) break;
+    const winner = simulateRally();
+    demoApplyPoint(set, winner);
+    set.rallies.push({actions:[]});
+  }
+  // Die letzte (leere) Rally war nur der "nächste Ballwechsel" — für einen abgeschlossenen Satz
+  // wieder entfernen, damit set.rallies exakt der Anzahl gespielter Punkte entspricht.
+  set.rallies.pop();
+  set.winner = set.homeScore>set.awayScore ? 'home':'away';
+}
+
 function buildDemoMatch(){
   const homePlayers = demoHomeRoster();
   const awayPlayers = demoAwayRoster();
   const homeLineup = homePlayers.slice(0,6).map(p=>p.id);
   const awayLineup = awayPlayers.slice(0,6).map(p=>p.id);
+  const homeSetterId = homePlayers[0].id; // Mia — laut Kader "Zuspiel", auch als Coach-Live-Zuspielerin gesetzt
+  const awaySetterId = awayPlayers[2].id; // fixe Stand-in-Zuspielerin für die Gegner-Statistik (kein eigenes Zuspieler-Feature für den Gegner)
 
-  // Ein paar über das Feld verteilte Zielpunkte, damit die Richtungsdiagramme in der Vorschau
-  // schon gut gefüllt aussehen (Werte sind rein illustrativ).
-  const hT = [{x:18,y:18},{x:50,y:14},{x:82,y:20},{x:28,y:38},{x:72,y:34},{x:40,y:10}];
-  const aT = [{x:18,y:112},{x:50,y:118},{x:82,y:110},{x:28,y:92},{x:72,y:96},{x:40,y:122}];
+  const rng = mulberry32(12345); // fester Seed -> jedes Mal dieselbe, aber realistische Vorschau
 
-  function act(skill, team, pid, code, from, to){
-    const a = {skill, team, playerId:pid, code, ts:Date.now()};
-    if(ZONE_SKILLS.includes(skill) && from && to){ a.fromPoint=from; a.toPoint=to; }
-    return a;
-  }
-  const rally = actions => ({actions});
-
-  function demoRallies(hLu, aLu, homeTargets, awayTargets){
-    return [
-      rally([ act('S','home',hLu[0],'#', positionCoord('home',1), homeTargets[0]) ]),
-      rally([
-        act('S','away',aLu[0],'+', positionCoord('away',1), awayTargets[0]),
-        act('R','home',hLu[4],'#'),
-        act('E','home',hLu[0],'#'),
-        act('A','home',hLu[1],'#', {x:17,y:80}, homeTargets[1]),
-      ]),
-      rally([
-        act('S','home',hLu[0],'!', positionCoord('home',1), homeTargets[2]),
-        act('R','away',aLu[3],'-'),
-        act('A','away',aLu[2],'=', {x:83,y:50}, awayTargets[1]),
-      ]),
-      rally([ act('S','away',aLu[0],'#', positionCoord('away',1), awayTargets[2]) ]),
-      rally([
-        act('S','home',hLu[0],'+', positionCoord('home',1), homeTargets[3]),
-        act('R','away',aLu[4],'#'),
-        act('E','away',aLu[0],'#'),
-        act('A','away',aLu[1],'+', {x:17,y:50}, awayTargets[3]),
-        act('B','home',hLu[2],'#'),
-      ]),
-      rally([
-        act('S','home',hLu[0],'-', positionCoord('home',1), homeTargets[4]),
-        act('R','away',aLu[3],'+'),
-        act('A','away',aLu[2],'#', {x:83,y:50}, awayTargets[4]),
-      ]),
-      rally([ act('S','away',aLu[0],'=', positionCoord('away',1), awayTargets[5]) ]),
-      rally([ act('S','home',hLu[0],'#', positionCoord('home',1), homeTargets[5]) ]),
-      rally([
-        act('D','away',aLu[5],'+'),
-        act('A','home',hLu[3],'#', {x:17,y:80}, homeTargets[0]),
-      ]),
-      rally([
-        act('S','away',aLu[0],'!', positionCoord('away',1), awayTargets[1]),
-        act('R','home',hLu[4],'-'),
-        act('A','home',hLu[1],'=', {x:17,y:80}, homeTargets[2]),
-      ]),
-    ];
-  }
-
-  const set1 = newSet(1, homeLineup, awayLineup, 'home');
-  set1.homeScore = 25; set1.awayScore = 20; set1.winner = 'home';
-  set1.rallies = demoRallies(homeLineup, awayLineup, hT, aT);
-
-  // Satz 2: Gegner gewinnt — Zielpunkte gespiegelt, damit es nicht wie eine reine Kopie aussieht.
-  const mirror = t => ({x:100-t.x, y:t.y});
-  const set2 = newSet(2, homeLineup, awayLineup, 'away');
-  set2.homeScore = 22; set2.awayScore = 25; set2.winner = 'away';
-  set2.rallies = demoRallies(homeLineup, awayLineup, hT.map(mirror), aT.map(mirror));
-
-  // Satz 3: frisch, 0:0 — hier kann live weitergespielt werden.
-  const set3 = newSet(3, homeLineup, awayLineup, 'home');
-
-  return {
+  const match = {
     id:'demo-match', date:Date.now(), opponentName:'Musterverein', bestOf:5,
     opponentRoster: awayPlayers, status:'in_progress',
-    sets: [set1, set2, set3]
+    sets: []
   };
+
+  // Zwei komplette, realistisch durchsimulierte Sätze (Stand nach Satz 2 typischerweise 1:1) —
+  // Satz 3 bleibt bewusst frisch bei 0:0, damit direkt live weitergespielt werden kann (u.a. um
+  // die Bank-Spielerin Ella als Libero einzuwechseln, siehe demoHomeRoster()).
+  let curHomeLineup = homeLineup.slice();
+  let curAwayLineup = awayLineup.slice();
+  let servingTeam = 'home';
+  for(let setNumber=1; setNumber<=2; setNumber++){
+    const set = newSet(setNumber, curHomeLineup, curAwayLineup, servingTeam, homeSetterId);
+    simulateSet(set, rng, homeSetterId, awaySetterId);
+    match.sets.push(set);
+    curHomeLineup = set.homeLineup;
+    curAwayLineup = set.awayLineup;
+    servingTeam = set.winner; // vereinfachte Regel, wie auch beim echten Satzübergang in closeRally()
+  }
+  match.sets.push(newSet(3, curHomeLineup, curAwayLineup, servingTeam, homeSetterId));
+
+  return match;
 }
 
 function startDemo(){
@@ -1775,13 +1893,18 @@ function computeDirections(match, skillCode){
   return dirs;
 }
 
-function directionSVG(playerDirs){
+// Farbe der Linien richtet sich nach dem TEAM (nicht mehr nach der Bewertung des einzelnen Zugs):
+// die Schnellerfassung zieht ohnehin so gut wie immer nur bei einem Punkt eine Linie (Fehler werden
+// meist ohne Start-/Zielposition über "Gegner-Fehler" erfasst) — eine Grün/Grau/Rot-Unterscheidung
+// nach Bewertung brachte dadurch kaum echten Zusatzwert. Stattdessen jetzt klar nach Team: Grün =
+// eigenes Team, Rot = Gegner — auf einen Blick erkennbar, welche Linien wem gehören.
+function directionSVG(playerDirs, team){
   const parts = [];
   parts.push('<rect x="2" y="2" width="96" height="126" fill="none" stroke="#3a4a6b" stroke-width="1"/>');
   parts.push('<line x1="2" y1="65" x2="98" y2="65" stroke="#3a4a6b" stroke-width="1.5"/>');
+  const color = team==='home' ? '#22c55e' : '#ef4444';
   playerDirs.lines.forEach(l=>{
     const from = l.fromPoint, to = l.toPoint;
-    const color = (l.code==='#'||l.code==='+') ? '#22c55e' : (l.code==='=' ? '#ef4444' : '#94a3b8');
     parts.push(`<line x1="${from.x}" y1="${from.y}" x2="${to.x}" y2="${to.y}" stroke="${color}" stroke-width="1.4" stroke-opacity="0.85"/>`);
     parts.push(`<circle cx="${to.x}" cy="${to.y}" r="1.8" fill="${color}"/>`);
   });
@@ -1807,7 +1930,7 @@ function renderDirections(main, match){
 
       if(teamLines.length>0){
         card.appendChild(el('div',{style:'font-size:12px;color:var(--muted);margin-bottom:4px;text-align:center;font-weight:700;'}, 'Team gesamt · '+teamName));
-        card.appendChild(el('div',{style:'max-width:220px;margin:0 auto 16px;'}, el('div',{html: directionSVG({lines:teamLines})})));
+        card.appendChild(el('div',{style:'max-width:220px;margin:0 auto 16px;'}, el('div',{html: directionSVG({lines:teamLines}, team)})));
       }
 
       if(entries.length>0){
@@ -1816,12 +1939,12 @@ function renderDirections(main, match){
         entries.sort((a,b)=> (a[1].number>b[1].number?1:-1)).forEach(([pid,d])=>{
           const box = el('div',{});
           box.appendChild(el('div',{style:'font-size:12px;color:var(--muted);margin-bottom:4px;text-align:center;'}, '#'+d.number));
-          box.appendChild(el('div',{html: directionSVG(d)}));
+          box.appendChild(el('div',{html: directionSVG(d, team)}));
           grid.appendChild(box);
         });
         card.appendChild(grid);
       }
-      card.appendChild(el('div',{style:'color:var(--muted); font-size:11px; margin-top:8px;'},'Linie = '+(skillCode==='S'?'Aufschlag':'Angriff')+'richtung (unten = eigene Seite, oben = Gegnerfeld). Grün = Punkt/gut, Grau = weiter, Rot = Fehler.'));
+      card.appendChild(el('div',{style:'color:var(--muted); font-size:11px; margin-top:8px;'},'Linie = '+(skillCode==='S'?'Aufschlag':'Angriff')+'richtung (unten = eigene Seite, oben = Gegnerfeld). '+(team==='home'?'Grün = '+state.teamName:'Rot = '+teamName)+'.'));
       main.appendChild(card);
     });
   });
@@ -2144,15 +2267,17 @@ function computeAttackTypeDistribution(match, team){
   return dist;
 }
 
-// Grobe Feldbereichs-Einteilung für die Heatmap: 3 Spalten × 3 Reihen (netznah/mittig/Grundlinie)
-// je Hälfte — bewusst eine einfache Orientierungshilfe, keine offizielle FIVB-Zonennummerierung.
+// Feinere Feldbereichs-Einteilung für die Heatmap: HEATMAP_GRID Spalten × HEATMAP_GRID Reihen je
+// Hälfte (6×6 = 36 Zonen statt vorher 3×3 = 9, für mehr Präzision) — bewusst eine einfache
+// Orientierungshilfe, keine offizielle FIVB-Zonennummerierung.
+const HEATMAP_GRID = 6;
 function courtZoneOf(point){
   if(!point) return null;
-  const col = Math.max(0, Math.min(2, Math.floor(point.x / (100/3))));
+  const col = Math.max(0, Math.min(HEATMAP_GRID-1, Math.floor(point.x / (100/HEATMAP_GRID))));
   const onAwayHalf = point.y < 65;
   const rel = onAwayHalf ? (65-point.y)/65 : (point.y-65)/65; // 0 = netznah, 1 = Grundlinie
-  const row = Math.max(0, Math.min(2, Math.floor(rel*3)));
-  return { half: onAwayHalf?'away':'home', row, col, zone: row*3+col };
+  const row = Math.max(0, Math.min(HEATMAP_GRID-1, Math.floor(rel*HEATMAP_GRID)));
+  return { half: onAwayHalf?'away':'home', row, col, zone: row*HEATMAP_GRID+col };
 }
 
 // Angriffs-Heatmap: zählt erfasste Angriffe (mit Start-/Zielpunkt) je Landezone, getrennt nach
@@ -2213,25 +2338,31 @@ function renderOpponentAnalysis(main, match){
   main.appendChild(card);
 }
 
-// Heatmap: je Team eine 3×3-Kachel-Übersicht, wo die erfassten Angriffe gelandet sind. Farbintensität
-// relativ zur meistgenutzten Zone dieses Teams (rein visuell, keine absolute Skala).
+// Heatmap: je Team eine HEATMAP_GRID×HEATMAP_GRID-Kachel-Übersicht (36 Zonen), wo die erfassten
+// Angriffe gelandet sind. Farbintensität relativ zur meistgenutzten Zone dieses Teams (rein visuell,
+// keine absolute Skala). Bei so vielen, entsprechend kleinen Kacheln passt die Punkt/Fehler-
+// Aufschlüsselung nicht mehr lesbar als Text hinein — die Gesamtzahl bleibt sichtbar, die
+// Aufschlüsselung steht zusätzlich als Tooltip (title) auf der Kachel.
 function renderAttackHeatmap(main, match){
   const card = el('div',{class:'card'});
   card.appendChild(el('h2',{},'🔥 Angriffs-Heatmap'));
-  card.appendChild(el('div',{style:'color:var(--muted);font-size:12px;margin-bottom:8px;'},'Zielbereiche der erfassten Angriffe (Punkt ✓ / Fehler ✗). Oben = netznah, unten = Grundlinie.'));
+  card.appendChild(el('div',{style:'color:var(--muted);font-size:12px;margin-bottom:8px;'},'Zielbereiche der erfassten Angriffe, in '+(HEATMAP_GRID*HEATMAP_GRID)+' Zonen ('+HEATMAP_GRID+'×'+HEATMAP_GRID+'). Zahl je Kachel = Gesamt, antippen/Maus drüber für Punkt ✓ / Fehler ✗. Oben = netznah, unten = Grundlinie.'));
   const wrap = el('div',{style:'display:flex;gap:16px;flex-wrap:wrap;'});
   ['home','away'].forEach(team=>{
     const zones = computeAttackHeatmap(match, {team});
     const cells = []; let maxTotal = 0;
-    for(let i=0;i<9;i++){ const z = zones[i]||{total:0,point:0,error:0}; cells.push(z); if(z.total>maxTotal) maxTotal = z.total; }
-    const box = el('div',{style:'flex:1;min-width:170px;'});
+    const zoneCount = HEATMAP_GRID*HEATMAP_GRID;
+    for(let i=0;i<zoneCount;i++){ const z = zones[i]||{total:0,point:0,error:0}; cells.push(z); if(z.total>maxTotal) maxTotal = z.total; }
+    const box = el('div',{style:'flex:1;min-width:200px;'});
     box.appendChild(el('div',{style:'font-weight:700;margin-bottom:6px;'}, (team==='home'?state.teamName:match.opponentName)+' greift an'));
-    const grid = el('div',{style:'display:grid;grid-template-columns:repeat(3,1fr);gap:3px;'});
+    const grid = el('div',{style:'display:grid;grid-template-columns:repeat('+HEATMAP_GRID+',1fr);gap:2px;max-width:280px;'});
     cells.forEach(z=>{
       const alpha = z.total ? 0.15 + 0.65*(z.total/maxTotal) : 0.06;
-      grid.appendChild(el('div',{style:'aspect-ratio:1;border-radius:6px;background:rgba(59,130,246,'+alpha.toFixed(2)+');display:flex;flex-direction:column;align-items:center;justify-content:center;'},[
-        el('div',{style:'font-weight:800;font-size:13px;'}, String(z.total)),
-        z.total ? el('div',{style:'font-size:9px;color:var(--muted);'}, z.point+'✓/'+z.error+'✗') : null,
+      grid.appendChild(el('div',{
+        title: z.total ? (z.total+' gesamt · '+z.point+' Punkt ✓ · '+z.error+' Fehler ✗') : 'Keine Angriffe in dieser Zone',
+        style:'aspect-ratio:1;border-radius:3px;background:rgba(59,130,246,'+alpha.toFixed(2)+');display:flex;align-items:center;justify-content:center;'
+      },[
+        z.total ? el('div',{style:'font-weight:700;font-size:9.5px;'}, String(z.total)) : null,
       ]));
     });
     box.appendChild(grid);
